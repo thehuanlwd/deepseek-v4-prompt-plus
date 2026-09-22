@@ -8,13 +8,22 @@ import (
 	"sync"
 )
 
+// ModelConfig 表示某个供应商下支持的具体模型配置项
+type ModelConfig struct {
+	ID       string `json:"id"`
+	Name     string `json:"name,omitempty"`
+	Group    string `json:"group,omitempty"`
+	Protocol string `json:"protocol,omitempty"` // "openai" 或 "anthropic"
+}
+
 // Provider 表示一个上游供应商配置。
 // 每个供应商有独立的基础地址与 API Key；运行时仅使用“当前供应商”。
 type Provider struct {
-	Name             string `json:"name"`
-	BaseURL          string `json:"base_url"`
-	AnthropicBaseURL string `json:"anthropic_base_url"` // 可选：Anthropic 格式的专用基础地址；留空则自动推断
-	APIKey           string `json:"api_key"`             // 落盘时加密存储
+	Name             string        `json:"name"`
+	BaseURL          string        `json:"base_url"`
+	AnthropicBaseURL string        `json:"anthropic_base_url"` // 可选：Anthropic 格式的专用基础地址；留空则自动推断
+	APIKey           string        `json:"api_key"`             // 落盘时加密存储
+	Models           []ModelConfig `json:"models,omitempty"`    // 可选：该供应商下配置的模型清单；为空时处于默认穿透模式
 }
 
 type Config struct {
@@ -190,6 +199,9 @@ func SaveConfig(cfg Config) error {
 				return err
 			}
 			p.APIKey = enc
+		}
+		if len(p.Models) > 0 {
+			p.Models = append([]ModelConfig(nil), p.Models...)
 		}
 		saveCfg.Providers[i] = p
 	}

@@ -1405,14 +1405,59 @@ func (s *AnalysisService) GetTimelinePage(id string, offset, limit int) (Timelin
 	return TimelinePage{Items: items[offset:end], Total: total, Offset: offset, Limit: limit}, nil
 }
 
-// ExportMarkdown 导出特定 Session 的 Markdown 报告
-func (s *AnalysisService) ExportMarkdown(id string) (string, error) {
+// ExportConfig 控制导出诊断报告时包含的会话内容板块。
+// 各字段对应 UI 弹窗中的可选项；ToolResultMaxLen > 0 时将「AI 工具返回内容」截断为指定字符数的摘要。
+type ExportConfig struct {
+	SystemPrompt     bool `json:"system_prompt"`     // 系统提示词
+	UserMessage      bool `json:"user_message"`      // 用户消息
+	ToolPrompt       bool `json:"tool_prompt"`       // 工具提示词（可用工具定义）
+	Reasoning        bool `json:"reasoning"`         // AI 思考推理过程
+	ToolCall         bool `json:"tool_call"`         // AI 工具调用命令
+	ToolResult       bool `json:"tool_result"`       // AI 工具返回内容
+	Content          bool `json:"content"`           // AI 回复正文
+	ToolResultMaxLen int  `json:"tool_result_max_len"` // 0=不截断；>0=工具返回内容摘要到该字符数
+}
+
+// defaultFullExportConfig 默认模板：导出所有板块。
+func defaultFullExportConfig() *ExportConfig {
+	return &ExportConfig{
+		SystemPrompt: true,
+		UserMessage:  true,
+		ToolPrompt:   true,
+		Reasoning:    true,
+		ToolCall:     true,
+		ToolResult:   true,
+		Content:      true,
+		ToolResultMaxLen: 0,
+	}
+}
+
+// liteExportConfig 精简模板：仅系统提示词、用户消息、回复正文、工具调用命令、工具返回内容摘要(200字)。
+func liteExportConfig() *ExportConfig {
+	return &ExportConfig{
+		SystemPrompt:     true,
+		UserMessage:      true,
+		ToolPrompt:       false,
+		Reasoning:        false,
+		ToolCall:         true,
+		ToolResult:       true,
+		Content:          true,
+		ToolResultMaxLen: 200,
+	}
+}
+
+// ExportMarkdown 导出特定 Session 的 Markdown 报告。
+// cfg 为 nil 时按默认模板（导出全部板块）处理。
+func (s *AnalysisService) ExportMarkdown(id string, cfg *ExportConfig) (string, error) {
 	s.lock.RLock()
 	sess, exists := s.sessions[id]
 	s.lock.RUnlock()
 
 	if !exists {
 		return "", fmt.Errorf("session %s not found", id)
+	}
+	if cfg == nil {
+		cfg = defaultFullExportConfig()
 	}
 
 	var sb strings.Builder
@@ -1441,15 +1486,23 @@ func (s *AnalysisService) ExportMarkdown(id string) (string, error) {
 	}
 	sort.Ints(keys)
 
+	// 按板块开关截断工具返回内容
+	truncateToolResult := func(text string) string {
+		if cfg.ToolResultMaxLen <= 0 || text == "" {
+			return text
+		}
+		runes := []rune(text)
+		if len(runes) <= cfg.ToolResultMaxLen {
+			return text
+		}
+		return string(runes[:cfg.ToolResultMaxLen]) + "...(摘要截断)"
+	}
+
 	for _, k := range keys {
 		turn := sess.Turns[k]
 		sb.WriteString(fmt.Sprintf("### 轮次 %d (%s)\n\n", turn.TurnID, turn.StartTime.Local().Format("15:04:05")))
 
-		if turn.UserMessage != "" {
-			sb.WriteString(fmt.Sprintf("**🧑 用户**: %s\n\n", turn.UserMessage))
-		}
-
-		// 检查系统修改
+		// 检查系统修改（结构标注，始终保留）
 		if turn.SystemModified || turn.ExtraInjected {
 			sb.WriteString("> **⚙️ 系统干预**:\n")
 			if turn.SystemModified {
@@ -1461,7 +1514,7 @@ func (s *AnalysisService) ExportMarkdown(id string) (string, error) {
 			sb.WriteString("\n")
 		}
 
-		// 输出干预事件流
+		// 输出干预事件流（analyzer / retry 结构标注，始终保留）
 		for _, ev := range turn.Events {
 			if ev.Phase == "analyzer" {
 				sb.WriteString(fmt.Sprintf("> **🔍 反循环分析器**: 判定结果=`%s` | `%s`\n", ev.Response.AnalyzerJudgment, ev.Response.FinishReason))
@@ -1470,22 +1523,78 @@ func (s *AnalysisService) ExportMarkdown(id string) (string, error) {
 			}
 		}
 
-		if turn.ReasoningContent != "" {
-			sb.WriteString("<details>\n<summary>🧠 <b>模型深度思考过程</b></summary>\n\n")
-			sb.WriteString("```\n" + turn.ReasoningContent + "\n```\n")
-			sb.WriteString("</details>\n\n")
-		}
-
-		if len(turn.ToolCalls) > 0 {
-			sb.WriteString("**🛠️ 工具调用**:\n")
-			for _, tc := range turn.ToolCalls {
-				sb.WriteString(fmt.Sprintf("- `%s`\n", tc))
+		// 工具提示词（可用工具定义列表）
+		if cfg.ToolPrompt {
+			var toolsDetail []ToolMeta
+			for _, ev := range turn.Events {
+				if ev.Phase == "primary" {
+					toolsDetail = ev.Request.ToolsDetail
+					break
+				}
 			}
-			sb.WriteString("\n")
+			if len(toolsDetail) > 0 {
+				sb.WriteString("**🔧 工具提示词（可用工具定义）**:\n")
+				for _, td := range toolsDetail {
+					sb.WriteString(fmt.Sprintf("- `%s`: %s\n", td.Name, td.Description))
+				}
+				sb.WriteString("\n")
+			}
 		}
 
-		if turn.AssistantResponse != "" {
-			sb.WriteString(fmt.Sprintf("**🤖 模型回复**:\n\n%s\n\n", turn.AssistantResponse))
+		// 遍历本轮清洗后的对话历史，按板块开关输出
+		if len(turn.ChatHistory) > 0 {
+			for _, msg := range turn.ChatHistory {
+				switch msg.Role {
+				case "system":
+					if cfg.SystemPrompt && msg.Content != "" {
+						sb.WriteString(fmt.Sprintf("**📋 系统提示词**:\n\n%s\n\n", msg.Content))
+					}
+				case "user":
+					if cfg.UserMessage && msg.Content != "" {
+						sb.WriteString(fmt.Sprintf("**🧑 用户**: %s\n\n", msg.Content))
+					}
+				case "tool":
+					if cfg.ToolResult && msg.Content != "" {
+						sb.WriteString(fmt.Sprintf("**📎 工具返回内容**:\n\n%s\n\n", truncateToolResult(msg.Content)))
+					}
+				case "assistant":
+					if cfg.Reasoning && msg.ReasoningContent != "" {
+						sb.WriteString("<details>\n<summary>🧠 <b>模型深度思考过程</b></summary>\n\n")
+						sb.WriteString("```\n" + msg.ReasoningContent + "\n```\n")
+						sb.WriteString("</details>\n\n")
+					}
+					if cfg.ToolCall && len(msg.ToolCalls) > 0 {
+						sb.WriteString("**🛠️ 工具调用命令**:\n")
+						for _, tc := range msg.ToolCalls {
+							sb.WriteString(fmt.Sprintf("- `%s`\n", tc))
+						}
+						sb.WriteString("\n")
+					}
+					if cfg.Content && msg.Content != "" {
+						sb.WriteString(fmt.Sprintf("**🤖 模型回复**:\n\n%s\n\n", msg.Content))
+					}
+				}
+			}
+		} else {
+			// 兜底：ChatHistory 为空时沿用轮次级聚合字段
+			if cfg.UserMessage && turn.UserMessage != "" {
+				sb.WriteString(fmt.Sprintf("**🧑 用户**: %s\n\n", turn.UserMessage))
+			}
+			if cfg.Reasoning && turn.ReasoningContent != "" {
+				sb.WriteString("<details>\n<summary>🧠 <b>模型深度思考过程</b></summary>\n\n")
+				sb.WriteString("```\n" + turn.ReasoningContent + "\n```\n")
+				sb.WriteString("</details>\n\n")
+			}
+			if cfg.ToolCall && len(turn.ToolCalls) > 0 {
+				sb.WriteString("**🛠️ 工具调用命令**:\n")
+				for _, tc := range turn.ToolCalls {
+					sb.WriteString(fmt.Sprintf("- `%s`\n", tc))
+				}
+				sb.WriteString("\n")
+			}
+			if cfg.Content && turn.AssistantResponse != "" {
+				sb.WriteString(fmt.Sprintf("**🤖 模型回复**:\n\n%s\n\n", turn.AssistantResponse))
+			}
 		}
 
 		sb.WriteString("---\n\n")

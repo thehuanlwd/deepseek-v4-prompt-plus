@@ -113,6 +113,41 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// 拦截客户端获取模型列表请求：若当前供应商配置了自定义/指定模型，直接返回本地模型清单；为空时继续穿透至上游
+	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
+	if r.Method == "GET" && (cleanPath == "/v1/models" || cleanPath == "/models") {
+		if p, ok := s.activeProvider(); ok && len(p.Models) > 0 {
+			type modelItem struct {
+				ID      string `json:"id"`
+				Object  string `json:"object"`
+				Created int64  `json:"created"`
+				OwnedBy string `json:"owned_by"`
+			}
+			var list []modelItem
+			now := time.Now().Unix()
+			for _, m := range p.Models {
+				ownedBy := m.Group
+				if ownedBy == "" {
+					ownedBy = p.Name
+				}
+				list = append(list, modelItem{
+					ID:      m.ID,
+					Object:  "model",
+					Created: now,
+					OwnedBy: ownedBy,
+				})
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data":   list,
+			})
+			return
+		}
+	}
+
 	startTime := time.Now()
 	cfg := s.config.Get()
 

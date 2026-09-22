@@ -140,6 +140,7 @@ function init() {
       
       if (pageId === 'settings') loadSettings();
       if (pageId === 'analysis') loadAnalysisSessions();
+      if (pageId === 'models') initModelServicesPage();
       
       // 切页时自动收拢抽屉
       if (pageId !== 'dashboard') {
@@ -987,6 +988,7 @@ async function loadSettings() {
 // ── 供应商（多上游）管理 ──
 let providersData = [];
 let activeProviderIndex = 0;
+let persistProvidersTimer = null;
 
 function renderProviders(providers, active) {
   providersData = (providers || []).map(p => ({
@@ -994,15 +996,63 @@ function renderProviders(providers, active) {
     BaseURL: p.base_url || '',
     AnthropicBaseURL: p.anthropic_base_url || '',
     APIKey: p.api_key || '',
+    Models: Array.isArray(p.models) ? p.models.map(m => ({
+      id: m.id || '',
+      name: m.name || m.id || '',
+      group: m.group || '',
+      protocol: m.protocol || 'openai'
+    })) : []
   }));
   if (providersData.length === 0) {
-    providersData = [{ Name: 'DeepSeek', BaseURL: 'https://api.deepseek.com', APIKey: '' }];
+    providersData = [{ Name: 'DeepSeek', BaseURL: 'https://api.deepseek.com', AnthropicBaseURL: '', APIKey: '', Models: [] }];
   }
   activeProviderIndex = 0;
   const ai = providersData.findIndex(p => p.Name === active);
   if (ai >= 0) activeProviderIndex = ai;
   populateProviderSelect();
   fillProviderEditor();
+
+  if (typeof renderModelProvidersList === 'function') {
+    renderModelProvidersList();
+    renderCurrentProviderDetail();
+  }
+}
+
+async function persistProvidersConfig(silent = false) {
+  const payload = {
+    providers: providersData.map(p => ({
+      name: p.Name,
+      base_url: p.BaseURL,
+      anthropic_base_url: p.AnthropicBaseURL,
+      api_key: p.APIKey,
+      models: p.Models || []
+    })),
+    active_provider: providersData[activeProviderIndex] ? providersData[activeProviderIndex].Name : ''
+  };
+
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const resp = await r.json();
+    setRestartBanner(resp.restart_required, resp.restart_reasons);
+    if (!silent) {
+      triggerAlert(t('alert.saved') || '配置已保存');
+    }
+  } catch (e) {
+    if (!silent) {
+      triggerAlert(t('alert.save_failed') || '保存配置失败');
+    }
+  }
+}
+
+function debouncePersistProviders(delayMs = 600) {
+  if (persistProvidersTimer) clearTimeout(persistProvidersTimer);
+  persistProvidersTimer = setTimeout(() => {
+    persistProvidersConfig(true);
+  }, delayMs);
 }
 
 function populateProviderSelect() {
@@ -1120,7 +1170,13 @@ async function saveSettings() {
   const payload = {
     port: parseInt($('cfgPort').value) || 8188,
     lan_access: $('cfgLanAccess').checked,
-    providers: providersData.map(p => ({ name: p.Name, base_url: p.BaseURL, anthropic_base_url: p.AnthropicBaseURL, api_key: p.APIKey })),
+    providers: providersData.map(p => ({
+      name: p.Name,
+      base_url: p.BaseURL,
+      anthropic_base_url: p.AnthropicBaseURL,
+      api_key: p.APIKey,
+      models: p.Models || []
+    })),
     active_provider: providersData[activeProviderIndex] ? providersData[activeProviderIndex].Name : '',
     verbose_logging: $('cfgVerbose').checked,
     thinking_mode: $('cfgThinkingMode').value,
@@ -1675,7 +1731,7 @@ function createTimelineItemDOM(sessionId, item) {
     const title = item.phase === 'analyzer' ? (t('analysis.analyzer_triggered') || '系统：并行防无限思考分析已触发') : (t('analysis.retry_executed') || '系统：反无限思考重试已执行');
     notice.innerHTML = `
       <div class="system-notice-title">
-        <span>${title}</span>
+        <span>${title}</span>${item.turn_id ? `<span class="request-seq-badge">#${item.turn_id}</span>` : ''}
         ${item.log_id ? `<span class="jump-raw-btn" onclick="jumpToRawLog(${item.log_id})">[原始数据]</span>` : ''}
       </div>
       <div>${escapeHtml(item.preview || '')}</div>
@@ -1787,7 +1843,7 @@ function createTimelineItemDOM(sessionId, item) {
 
   node.innerHTML = `
     <div class="${useNoticeStyle ? 'system-notice-title' : 'bubble-meta'}" ${useNoticeStyle ? 'style="color:var(--yorha-accent)"' : ''}>
-      <span>${roleName}</span>
+      <span>${roleName}</span>${item.turn_id ? `<span class="request-seq-badge" title="${t('analysis.request_seq_title') || '所属请求轮次'}">#${item.turn_id}</span>` : ''}
       ${toolsBadgeHtml}
     </div>
     ${toolsPanelHtml}
@@ -2271,7 +2327,100 @@ function genCollapsibleHtml(text, turnId, field, historyIdx = -1) {
 
 function exportSessionMarkdown() {
   if (!currentSessionId) return;
-  window.open(`/api/analysis/sessions/${currentSessionId}/export.md`);
+  openExportModal();
+}
+
+// ── 导出诊断报告配置弹窗 ──
+let currentExportTemplate = 'full';
+
+function defaultExportConfig() {
+  return {
+    system_prompt: true, user_message: true, tool_prompt: true,
+    reasoning: true, tool_call: true, tool_result: true, content: true,
+    tool_result_max_len: 0
+  };
+}
+
+function liteExportConfig() {
+  return {
+    system_prompt: true, user_message: true, tool_prompt: false,
+    reasoning: false, tool_call: true, tool_result: true, content: true,
+    tool_result_max_len: 200
+  };
+}
+
+function openExportModal() {
+  if (!currentSessionId) return;
+  // 将模板下拉框转换为 yorha 自定义组件，并默认选中「默认（全部）」
+  convertSelectsToYorha('#exportModal');
+  const tplSelect = $('exportTemplateSelect');
+  if (tplSelect) {
+    tplSelect.value = 'full';
+    tplSelect.dispatchEvent(new Event('change'));
+  } else {
+    selectExportTemplate('full');
+  }
+  const modal = $('exportModal');
+  modal.style.display = 'flex';
+  const serial = $('exportSerial');
+  if (serial) serial.textContent = 'ID: ' + (currentSessionId || '----');
+  requestAnimationFrame(() => modal.classList.add('open'));
+}
+
+function closeExportModal() {
+  const modal = $('exportModal');
+  modal.classList.remove('open');
+  modal.style.display = 'none';
+}
+
+function selectExportTemplate(tpl) {
+  currentExportTemplate = tpl;
+  const cfg = tpl === 'lite' ? liteExportConfig() : defaultExportConfig();
+  document.querySelectorAll('#exportModal input[data-sec]').forEach(cb => {
+    cb.checked = !!cfg[cb.dataset.sec];
+  });
+  const hint = $('exportHint');
+  if (hint) {
+    if (tpl === 'lite') {
+      hint.textContent = t('analysis.export_lite_hint') || '精简模板：仅导出系统提示词、用户消息、回复正文、工具调用命令，工具返回内容摘要为前 200 字。';
+    } else {
+      hint.textContent = t('analysis.export_full_hint') || '默认模板：导出全部内容板块。';
+    }
+  }
+}
+
+async function confirmExport() {
+  if (!currentSessionId) return;
+  const cfg = defaultExportConfig();
+  document.querySelectorAll('#exportModal input[data-sec]').forEach(cb => {
+    cfg[cb.dataset.sec] = cb.checked;
+  });
+  if (currentExportTemplate === 'lite') {
+    cfg.tool_result_max_len = 200;
+  }
+
+  try {
+    const r = await fetch(`/api/analysis/sessions/${currentSessionId}/export.md`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    });
+    if (!r.ok) throw new Error('export failed');
+    const md = await r.text();
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dsplus_session_${currentSessionId}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    closeExportModal();
+    triggerAlert(t('analysis.export_done') || '诊断报告已导出');
+  } catch (e) {
+    triggerAlert(t('analysis.export_failed') || '导出失败，请重试');
+  }
 }
 
 async function jumpToRawLog(logId) {
@@ -2300,8 +2449,8 @@ function stepValue(inputId, delta, min, max) {
 }
 
 // ── 寄叶自定义模拟下拉组件转换 ──
-function convertSelectsToYorha() {
-  const selects = document.querySelectorAll('#settings select');
+function convertSelectsToYorha(root = '#settings') {
+  const selects = document.querySelectorAll(root + ' select');
   selects.forEach(select => {
     // 如果之前已经转过，我们先清理掉以支持重新回填
     let wrapper = select.parentElement;
@@ -2422,6 +2571,12 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     themeSelect.addEventListener('change', applyLiveTheme);
   }
+
+  // 导出模板自定义下拉框：变更时同步板块勾选
+  const tplSelect = document.getElementById('exportTemplateSelect');
+  if (tplSelect) {
+    tplSelect.addEventListener('change', e => selectExportTemplate(e.target.value));
+  }
 });
 
 // ── 开始执行 ──
@@ -2470,3 +2625,794 @@ function toggleTextCollapse(container, event) {
     }
   }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   ── 模型服务 (供应商管理) 前端业务与真实接口实现 ──
+════════════════════════════════════════════════════════════════════ */
+
+let modelServicesInitialized = false;
+let curModelProviderIdx = 0;
+let curEndpointTabType = 'openai';
+let currentTestingModel = null;
+let currentTestingProtocol = 'openai';
+let fetchedModelsPool = [];
+let fetchedSelectedSet = new Set();
+
+async function initModelServicesPage() {
+  if (providersData.length === 0) {
+    await loadSettings();
+  }
+  if (activeProviderIndex >= 0 && activeProviderIndex < providersData.length) {
+    curModelProviderIdx = activeProviderIndex;
+  } else {
+    curModelProviderIdx = 0;
+  }
+  renderModelProvidersList();
+  renderCurrentProviderDetail();
+  modelServicesInitialized = true;
+}
+
+// ── 渲染左栏供应商列表 ──
+function renderModelProvidersList() {
+  const container = $('modelProviderListContainer');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const searchKeyword = ($('modelProviderSearchInput')?.value || '').trim().toLowerCase();
+  const countBadge = $('modelProviderCountBadge');
+  if (countBadge) countBadge.textContent = providersData.length;
+
+  if (curModelProviderIdx >= providersData.length) {
+    curModelProviderIdx = Math.max(0, providersData.length - 1);
+  }
+
+  providersData.forEach((provider, idx) => {
+    const pName = provider.Name || ('(未命名 ' + idx + ')');
+    if (searchKeyword && !pName.toLowerCase().includes(searchKeyword)) {
+      return;
+    }
+
+    const isExternal = (idx === activeProviderIndex);
+    const item = document.createElement('div');
+    item.className = 'provider-list-item' + (idx === curModelProviderIdx ? ' active' : '');
+
+    const iconLetter = (pName.charAt(0) || 'P').toUpperCase();
+    const externalTagHtml = isExternal ? `<span class="provider-external-tag">[对外]</span>` : '';
+    const modelsCountText = provider.Models && provider.Models.length > 0 ? `${provider.Models.length} 模型` : '穿透模式';
+
+    item.innerHTML = `
+      <div class="provider-icon-badge">${escapeHtml(iconLetter)}</div>
+      <div class="provider-info-col">
+        <div class="provider-info-name-row">
+          <span class="provider-info-name" title="${escapeHtml(pName)}">${escapeHtml(pName)}</span>
+          ${externalTagHtml}
+        </div>
+        <div style="font-size: 10px; opacity: 0.7; font-family: monospace;">
+          ${modelsCountText}
+        </div>
+      </div>
+      <label class="yorha-switch" style="flex-shrink: 0;" title="切换为当前对外供应商 (单选)" onclick="event.stopPropagation()">
+        <input type="checkbox" ${isExternal ? 'checked' : ''} onchange="toggleProviderExternal(${idx}, this.checked)">
+        <span class="yorha-slider"></span>
+      </label>
+    `;
+
+    item.addEventListener('click', () => {
+      if (curModelProviderIdx !== idx) {
+        curModelProviderIdx = idx;
+        renderModelProvidersList();
+        renderCurrentProviderDetail();
+      }
+    });
+
+    container.appendChild(item);
+  });
+}
+
+function filterProvidersListUI() {
+  renderModelProvidersList();
+}
+
+// ── 切换对外生效的供应商 (单选互斥) ──
+async function toggleProviderExternal(idx, checked) {
+  if (!checked && idx === activeProviderIndex) {
+    renderModelProvidersList();
+    return;
+  }
+
+  activeProviderIndex = idx;
+  const targetProvider = providersData[activeProviderIndex];
+
+  // 同步系统设置页面的下拉框
+  const sel = $('cfgActiveProvider');
+  if (sel) {
+    sel.value = String(activeProviderIndex);
+    refreshProviderDropdown();
+    fillProviderEditor();
+  }
+
+  renderModelProvidersList();
+  renderCurrentProviderDetail();
+
+  await persistProvidersConfig(true);
+  triggerAlert(`已切换对外服务供应商: [ ${targetProvider?.Name} ]`);
+}
+
+// ── 渲染右栏当前选中供应商详情 ──
+function renderCurrentProviderDetail() {
+  const p = providersData[curModelProviderIdx];
+  if (!p) return;
+
+  $('curProviderNameInput').value = p.Name || '';
+  $('curProviderApiKey').value = p.APIKey || '';
+  $('curProviderBaseUrl').value = p.BaseURL || '';
+  $('curProviderAnthropicUrl').value = p.AnthropicBaseURL || '';
+
+  const chip = $('providerPingStatusChip');
+  if (chip) chip.style.display = 'none';
+
+  updateEndpointPreview();
+  switchEndpointTab(curEndpointTabType);
+  renderProviderModelsList();
+}
+
+function onCurProviderNameChange(val) {
+  const p = providersData[curModelProviderIdx];
+  if (!p) return;
+  p.Name = val;
+
+  const activeItem = document.querySelector('.provider-list-item.active .provider-info-name');
+  if (activeItem) activeItem.textContent = val;
+
+  const opt = $('cfgActiveProvider')?.querySelector(`option[value="${curModelProviderIdx}"]`);
+  if (opt) {
+    opt.textContent = val;
+    refreshProviderDropdown();
+  }
+
+  debouncePersistProviders(800);
+}
+
+function syncAndAutoSaveProviderData() {
+  const p = providersData[curModelProviderIdx];
+  if (!p) return;
+  p.APIKey = $('curProviderApiKey').value.trim();
+  p.BaseURL = $('curProviderBaseUrl').value.trim();
+  p.AnthropicBaseURL = $('curProviderAnthropicUrl').value.trim();
+  updateEndpointPreview();
+
+  if (curModelProviderIdx === activeProviderIndex) {
+    fillProviderEditor();
+  }
+
+  debouncePersistProviders(800);
+}
+
+function updateEndpointPreview() {
+  const base = ($('curProviderBaseUrl').value || 'https://api.example.com').replace(/\/+$/, '');
+  const anthropic = ($('curProviderAnthropicUrl').value || base).replace(/\/+$/, '');
+
+  const pOpenAI = $('previewOpenAI');
+  const pAnthropic = $('previewAnthropic');
+  if (pOpenAI) pOpenAI.textContent = `${base}/v1/chat/completions`;
+  if (pAnthropic) pAnthropic.textContent = `${anthropic}/v1/messages`;
+}
+
+// ── 协议 Tab 切换 ──
+function switchEndpointTab(type) {
+  curEndpointTabType = type;
+  const tabOpenAI = $('tabOpenAI');
+  const tabAnthropic = $('tabAnthropic');
+  const paneOpenAI = $('paneOpenAI');
+  const paneAnthropic = $('paneAnthropic');
+
+  if (type === 'openai') {
+    tabOpenAI?.classList.add('active');
+    tabAnthropic?.classList.remove('active');
+    if (paneOpenAI) paneOpenAI.style.display = '';
+    if (paneAnthropic) paneAnthropic.style.display = 'none';
+  } else {
+    tabOpenAI?.classList.remove('active');
+    tabAnthropic?.classList.add('active');
+    if (paneOpenAI) paneOpenAI.style.display = 'none';
+    if (paneAnthropic) paneAnthropic.style.display = '';
+  }
+}
+
+// ── 删除当前选中的供应商 ──
+async function deleteCurrentModelProvider() {
+  if (providersData.length <= 1) {
+    triggerAlert(t('settings.provider_delete_last') || '至少保留一个供应商配置');
+    return;
+  }
+  const targetName = providersData[curModelProviderIdx].Name;
+  if (!confirm(`确认删除供应商 [ ${targetName} ] 吗？`)) return;
+
+  const wasActive = (curModelProviderIdx === activeProviderIndex);
+  providersData.splice(curModelProviderIdx, 1);
+
+  if (curModelProviderIdx >= providersData.length) {
+    curModelProviderIdx = providersData.length - 1;
+  }
+  if (wasActive) {
+    activeProviderIndex = 0;
+  } else if (activeProviderIndex > curModelProviderIdx) {
+    activeProviderIndex--;
+  }
+
+  populateProviderSelect();
+  fillProviderEditor();
+  renderModelProvidersList();
+  renderCurrentProviderDetail();
+
+  await persistProvidersConfig(true);
+  triggerAlert('供应商已移除');
+}
+
+// ── 连通性测试 (真实调用后端 /api/providers/ping) ──
+async function testProviderPing() {
+  const p = providersData[curModelProviderIdx];
+  const btn = $('btnPingApi');
+  const chip = $('providerPingStatusChip');
+  if (!btn || !chip || !p) return;
+
+  if (!p.BaseURL && !p.AnthropicBaseURL) {
+    triggerAlert('请先配置基础地址 (Base URL)');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '检测中...';
+  chip.style.display = 'none';
+
+  try {
+    const payload = {
+      base_url: p.BaseURL,
+      anthropic_base_url: p.AnthropicBaseURL,
+      api_key: p.APIKey,
+      protocol: curEndpointTabType
+    };
+
+    const res = await fetch('/api/providers/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+
+    chip.style.display = 'inline-block';
+    if (data.ok) {
+      chip.className = 'badge badge-yes';
+      chip.textContent = `HTTP ${data.status} OK // 延迟: ${data.latency_ms}ms`;
+    } else if (data.status > 0) {
+      chip.className = 'badge badge-no';
+      const statusText = data.status === 401 ? '鉴权失败 (API Key 错误)' : (data.status_text || '状态异常');
+      chip.textContent = `HTTP ${data.status} // ${statusText} (${data.latency_ms}ms)`;
+    } else {
+      chip.className = 'badge badge-no';
+      chip.textContent = `连接失败 // ${data.error || '网络不可达'}`;
+    }
+  } catch (err) {
+    chip.style.display = 'inline-block';
+    chip.className = 'badge badge-no';
+    chip.textContent = `请求失败 // ${err.message || '网络异常'}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '连通性测试';
+  }
+}
+
+// ── 切换 API Key 明密文显示 ──
+function toggleModelApiKeyVisibility() {
+  const input = $('curProviderApiKey');
+  const btn = input?.parentElement?.querySelector('.yorha-eye-btn');
+  if (!input || !btn) return;
+  if (input.type === 'password') {
+    input.type = 'text';
+    btn.classList.add('visible');
+  } else {
+    input.type = 'password';
+    btn.classList.remove('visible');
+  }
+}
+
+// ── 渲染模型列表 (分组折叠与穿透检测) ──
+function renderProviderModelsList() {
+  const p = providersData[curModelProviderIdx];
+  const container = $('modelGroupsWrapper');
+  const passthroughBanner = $('passthroughBanner');
+  const countBadge = $('modelsCountBadge');
+  if (!container || !p) return;
+
+  container.innerHTML = '';
+  const search = ($('modelSearchInput')?.value || '').trim().toLowerCase();
+  const models = p.Models || [];
+
+  if (models.length === 0) {
+    if (passthroughBanner) passthroughBanner.style.display = 'flex';
+    if (countBadge) countBadge.textContent = '0 (默认穿透)';
+    return;
+  }
+
+  if (passthroughBanner) passthroughBanner.style.display = 'none';
+  if (countBadge) countBadge.textContent = `${models.length} (已限制)`;
+
+  const groupsMap = {};
+  models.forEach(m => {
+    if (search && !m.id.toLowerCase().includes(search) && !(m.name && m.name.toLowerCase().includes(search))) {
+      return;
+    }
+    const g = m.group || '通用 (General)';
+    if (!groupsMap[g]) groupsMap[g] = [];
+    groupsMap[g].push(m);
+  });
+
+  const groupKeys = Object.keys(groupsMap);
+  if (groupKeys.length === 0) {
+    container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--yorha-fg-dim);font-size:12px;">无匹配的模型条目</div>';
+    return;
+  }
+
+  groupKeys.forEach(groupName => {
+    const list = groupsMap[groupName];
+    const groupCard = document.createElement('div');
+    groupCard.className = 'model-group-card';
+
+    groupCard.innerHTML = `
+      <div class="model-group-header" onclick="this.parentElement.classList.toggle('collapsed')">
+        <div class="model-group-title">
+          <span class="model-group-arrow">▼</span>
+          <span>${escapeHtml(groupName)}</span>
+          <span class="badge" style="font-size:10px;">${list.length}</span>
+        </div>
+        <span style="font-size: 10px; color: var(--yorha-fg-dim); font-family: monospace;">[ 折叠 / 展开 ]</span>
+      </div>
+      <div class="model-group-body">
+        ${list.map(m => `
+          <div class="model-item-row">
+            <div class="model-item-main">
+              <div class="provider-icon-badge" style="width:24px;height:24px;font-size:10px;">
+                ${m.protocol === 'anthropic' ? 'AN' : 'AI'}
+              </div>
+              <div class="model-item-title-box">
+                <span class="model-item-name">${escapeHtml(m.name || m.id)}</span>
+                <span class="model-item-id">${escapeHtml(m.id)}</span>
+              </div>
+            </div>
+            <div class="model-item-actions">
+              <button type="button" class="button btn-model-test" onclick="openLlmTestModal('${escapeHtml(m.id)}', '${m.protocol || 'openai'}')">
+                测试
+              </button>
+              <button type="button" class="button btn-model-remove" onclick="removeModelFromProvider('${escapeHtml(m.id)}')">
+                删除
+              </button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+
+    container.appendChild(groupCard);
+  });
+}
+
+function filterModelsListUI() {
+  renderProviderModelsList();
+}
+
+// ── 从当前供应商中删除指定模型 ──
+async function removeModelFromProvider(modelId) {
+  const p = providersData[curModelProviderIdx];
+  if (!p || !p.Models) return;
+  p.Models = p.Models.filter(m => m.id !== modelId);
+  renderProviderModelsList();
+  renderModelProvidersList();
+  await persistProvidersConfig(true);
+  triggerAlert(`已移除模型 [ ${modelId} ]`);
+}
+
+// ── 模态弹窗 1: 从上游抓取可用模型 ──
+async function openFetchModelsModal() {
+  const modal = $('fetchModelsModal');
+  if (!modal) return;
+  fetchedSelectedSet.clear();
+
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  await refreshFetchedModels();
+}
+
+function closeFetchModelsModal() {
+  const modal = $('fetchModelsModal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.style.display = 'none';
+  }
+}
+
+async function refreshFetchedModels() {
+  const p = providersData[curModelProviderIdx];
+  const listEl = $('fetchedModelsList');
+  if (!listEl || !p) return;
+
+  listEl.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--yorha-fg-dim);font-size:12px;">正在请求上游 GET /v1/models...</div>';
+  fetchedModelsPool = [];
+
+  try {
+    const res = await fetch('/api/providers/fetch-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_url: p.BaseURL, api_key: p.APIKey })
+    });
+    const data = await res.json();
+    if (data.error) {
+      listEl.innerHTML = `<div style="padding:1.5rem;text-align:center;color:var(--yorha-accent);font-size:12px;">拉取失败: ${escapeHtml(data.error)}</div>`;
+      return;
+    }
+    fetchedModelsPool = data.models || [];
+    renderFetchedModelsList();
+    triggerAlert(`成功获取到 ${fetchedModelsPool.length} 个上游模型`);
+  } catch (err) {
+    listEl.innerHTML = `<div style="padding:1.5rem;text-align:center;color:var(--yorha-accent);font-size:12px;">网络请求失败: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderFetchedModelsList() {
+  const listEl = $('fetchedModelsList');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  const search = ($('fetchSearchInput')?.value || '').trim().toLowerCase();
+
+  const filtered = fetchedModelsPool.filter(item => {
+    if (!search) return true;
+    return item.id.toLowerCase().includes(search) || (item.group && item.group.toLowerCase().includes(search));
+  });
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--yorha-fg-dim);font-size:12px;">无可用模型或未匹配到关键词</div>';
+    return;
+  }
+
+  filtered.forEach(item => {
+    const row = document.createElement('div');
+    const isChecked = fetchedSelectedSet.has(item.id);
+    row.className = 'fetched-model-row' + (isChecked ? ' selected' : '');
+
+    row.innerHTML = `
+      <label class="yorha-checkbox" onclick="event.stopPropagation()">
+        <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleFetchedSelect('${escapeHtml(item.id)}', this.checked)">
+      </label>
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:bold; font-family:monospace; font-size:12px;">${escapeHtml(item.id)}</div>
+        <div style="font-size:10px; color:var(--yorha-fg-dim);">分组: ${escapeHtml(item.group || '通用')}</div>
+      </div>
+    `;
+
+    row.addEventListener('click', (e) => {
+      if (e.target.tagName !== 'INPUT') {
+        const cb = row.querySelector('input');
+        if (cb) {
+          cb.checked = !cb.checked;
+          toggleFetchedSelect(item.id, cb.checked);
+        }
+      }
+    });
+
+    listEl.appendChild(row);
+  });
+
+  const selCount = $('fetchedSelectedCount');
+  if (selCount) selCount.textContent = `已选: ${fetchedSelectedSet.size}`;
+}
+
+function filterFetchedModelsUI() {
+  renderFetchedModelsList();
+}
+
+function toggleFetchedSelect(id, checked) {
+  if (checked) fetchedSelectedSet.add(id);
+  else fetchedSelectedSet.delete(id);
+
+  const selCount = $('fetchedSelectedCount');
+  if (selCount) selCount.textContent = `已选: ${fetchedSelectedSet.size}`;
+
+  const listEl = $('fetchedModelsList');
+  if (listEl) {
+    const rows = listEl.querySelectorAll('.fetched-model-row');
+    rows.forEach(r => {
+      const cb = r.querySelector('input');
+      if (cb) {
+        if (cb.checked) r.classList.add('selected');
+        else r.classList.remove('selected');
+      }
+    });
+  }
+}
+
+async function confirmImportFetchedModels() {
+  const p = providersData[curModelProviderIdx];
+  if (!p) return;
+  if (!p.Models) p.Models = [];
+
+  let addedCount = 0;
+  fetchedSelectedSet.forEach(id => {
+    if (!p.Models.some(m => m.id === id)) {
+      const match = fetchedModelsPool.find(m => m.id === id);
+      p.Models.push({
+        id: id,
+        name: id,
+        group: match ? match.group : '通用 (General)',
+        protocol: 'openai'
+      });
+      addedCount++;
+    }
+  });
+
+  closeFetchModelsModal();
+  renderProviderModelsList();
+  renderModelProvidersList();
+
+  await persistProvidersConfig(true);
+  triggerAlert(`已导入 ${addedCount} 个模型`);
+}
+
+// ── 模态弹窗 2: 手动自定义添加模型 ──
+function openCustomModelModal() {
+  const modal = $('customModelModal');
+  if (!modal) return;
+  $('customModelId').value = '';
+  $('customModelName').value = '';
+  $('customModelGroup').value = '';
+  $('customModelProtocol').value = 'openai';
+  convertSelectsToYorha('#customModelModal');
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => modal.classList.add('open'));
+}
+
+function closeCustomModelModal() {
+  const modal = $('customModelModal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.style.display = 'none';
+  }
+}
+
+// ── 基于 ID 从后往前自动解析填写名称与组 ──
+function onCustomModelIdInput(val) {
+  val = (val || '').trim();
+  if (!val) {
+    $('customModelName').value = '';
+    $('customModelGroup').value = '';
+    return;
+  }
+  const lastSlashIdx = val.lastIndexOf('/');
+  if (lastSlashIdx !== -1) {
+    const group = val.substring(0, lastSlashIdx).trim();
+    const name = val.substring(lastSlashIdx + 1).trim();
+    $('customModelGroup').value = group;
+    $('customModelName').value = name;
+  } else {
+    $('customModelName').value = val;
+    $('customModelGroup').value = '';
+  }
+}
+
+async function confirmAddCustomModel() {
+  const p = providersData[curModelProviderIdx];
+  if (!p) return;
+  const id = ($('customModelId').value || '').trim();
+  if (!id) {
+    triggerAlert('请输入模型 ID');
+    return;
+  }
+
+  let group = ($('customModelGroup').value || '').trim();
+  let name = ($('customModelName').value || '').trim();
+
+  const lastSlashIdx = id.lastIndexOf('/');
+  if (lastSlashIdx !== -1) {
+    if (!group) {
+      group = id.substring(0, lastSlashIdx).trim();
+    }
+    if (!name) {
+      name = id.substring(lastSlashIdx + 1).trim();
+    }
+  } else {
+    if (!group) {
+      group = '自定义 (Custom)';
+    }
+    if (!name) {
+      name = id;
+    }
+  }
+
+  const protocol = $('customModelProtocol').value || 'openai';
+
+  if (!p.Models) p.Models = [];
+  const exists = p.Models.find(m => m.id === id);
+  if (exists) {
+    exists.name = name;
+    exists.group = group;
+    exists.protocol = protocol;
+  } else {
+    p.Models.push({ id, name, group, protocol });
+  }
+
+  closeCustomModelModal();
+  renderProviderModelsList();
+  renderModelProvidersList();
+
+  await persistProvidersConfig(true);
+  triggerAlert(`已添加模型 [ ${id} ]`);
+}
+
+// ── 模态弹窗 3: 添加新供应商 ──
+function openAddProviderModal() {
+  const modal = $('addProviderModal');
+  if (!modal) return;
+  $('newProviderPreset').value = 'custom';
+  $('newProviderName').value = '';
+  $('newProviderBaseUrl').value = '';
+  $('newProviderApiKey').value = '';
+  convertSelectsToYorha('#addProviderModal');
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => modal.classList.add('open'));
+}
+
+function closeAddProviderModal() {
+  const modal = $('addProviderModal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.style.display = 'none';
+  }
+}
+
+function applyProviderPreset(preset) {
+  const presets = {
+    deepseek: { name: 'DeepSeek 官方', base: 'https://api.deepseek.com' },
+    nvidia: { name: 'NVIDIA Integrate', base: 'https://integrate.api.nvidia.com' },
+    gemini: { name: 'Google Gemini', base: 'https://generativelanguage.googleapis.com' },
+    groq: { name: 'Groq Cloud', base: 'https://api.groq.com' },
+    custom: { name: '', base: '' }
+  };
+  const cfg = presets[preset] || presets.custom;
+  if (cfg.name) $('newProviderName').value = cfg.name;
+  if (cfg.base) $('newProviderBaseUrl').value = cfg.base;
+}
+
+async function confirmAddNewProvider() {
+  const name = ($('newProviderName').value || '').trim();
+  const base = ($('newProviderBaseUrl').value || '').trim();
+  const key = ($('newProviderApiKey').value || '').trim();
+
+  if (!name) {
+    triggerAlert('请输入供应商名称');
+    return;
+  }
+
+  const newP = {
+    Name: name,
+    BaseURL: base || 'https://api.example.com',
+    AnthropicBaseURL: '',
+    APIKey: key,
+    Models: []
+  };
+
+  providersData.push(newP);
+  curModelProviderIdx = providersData.length - 1;
+
+  closeAddProviderModal();
+  populateProviderSelect();
+  fillProviderEditor();
+  renderModelProvidersList();
+  renderCurrentProviderDetail();
+
+  await persistProvidersConfig(true);
+  triggerAlert(`供应商 [ ${name} ] 已添加`);
+}
+
+// ── 模态弹窗 4: 最小通用 LLM 可用性测试控制台 ──
+function openLlmTestModal(modelId, protocol) {
+  currentTestingModel = modelId;
+  currentTestingProtocol = protocol;
+  const modal = $('llmTestModal');
+  if (!modal) return;
+
+  $('testModalModelName').textContent = modelId;
+  $('testModalProtocol').textContent = (protocol || 'openai').toUpperCase();
+  $('llmTestSerial').textContent = 'STATUS: IDLE';
+
+  const term = $('llmTerminalBody');
+  term.innerHTML = `
+    <div class="term-line info">&gt; 准备对模型发起连通性可用性检测: ${escapeHtml(modelId)}</div>
+    <div class="term-line info">&gt; 协议规范: ${(protocol || 'openai').toUpperCase()}</div>
+    <div class="term-line info">&gt; 通用测试提示词: "连接测试，什么都别想，收到回复：收到了"</div>
+  `;
+
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => modal.classList.add('open'));
+}
+
+function closeLlmTestModal() {
+  const modal = $('llmTestModal');
+  if (modal) {
+    modal.classList.remove('open');
+    modal.style.display = 'none';
+  }
+}
+
+// 真实向当前选中的供应商地址发起通用最小化可用性测试请求
+async function runMinimalLlmTest() {
+  const p = providersData[curModelProviderIdx];
+  const btn = $('btnRunLlmTest');
+  const term = $('llmTerminalBody');
+  const statusSerial = $('llmTestSerial');
+  if (!btn || !term || !p) return;
+
+  btn.disabled = true;
+  statusSerial.textContent = 'STATUS: IN_FLIGHT';
+
+  const promptText = $('testModalPromptInput')?.value || '连接测试，什么都别想，收到回复：收到了';
+  const base = currentTestingProtocol === 'anthropic'
+    ? (p.AnthropicBaseURL || p.BaseURL || 'https://api.example.com')
+    : (p.BaseURL || 'https://api.example.com');
+  const cleanBase = base.replace(/\/+$/, '');
+  const predictedURL = currentTestingProtocol === 'anthropic'
+    ? `${cleanBase}/v1/messages`
+    : (cleanBase.endsWith('/v1') ? `${cleanBase}/chat/completions` : `${cleanBase}/v1/chat/completions`);
+
+  term.innerHTML += `
+    <div class="term-line request">&gt; POST ${escapeHtml(predictedURL)}</div>
+    <div class="term-line request">&gt; Target Provider: ${escapeHtml(p.Name)} | Model: ${escapeHtml(currentTestingModel)}</div>
+    <div class="term-line info">&gt; 正在直接向供应商上游网关发起可用性检测...</div>
+  `;
+  term.scrollTop = term.scrollHeight;
+
+  try {
+    const payload = {
+      base_url: p.BaseURL,
+      anthropic_base_url: p.AnthropicBaseURL,
+      api_key: p.APIKey,
+      model: currentTestingModel,
+      protocol: currentTestingProtocol,
+      prompt: promptText
+    };
+
+    const res = await fetch('/api/providers/test-llm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    const actualURL = data.target_url || predictedURL;
+
+    if (data.ok) {
+      term.innerHTML += `
+        <div class="term-line success">&gt; HTTP/1.1 ${data.status} ${data.status_text || 'OK'} (耗时: ${data.latency_ms}ms)</div>
+        <div class="term-line content">&gt; 回复正文: ${escapeHtml(data.reply || '(无文本)')}</div>
+        <div class="term-line success">&gt; [可用性测试通过] 供应商 [ ${escapeHtml(p.Name)} ] 该模型处于就绪状态</div>
+      `;
+      statusSerial.textContent = `STATUS: ${data.status}_OK`;
+    } else {
+      term.innerHTML += `
+        <div class="term-line danger">&gt; HTTP/1.1 ${data.status || 'ERR'} ${escapeHtml(data.status_text || 'Error')} (耗时: ${data.latency_ms || 0}ms)</div>
+        <div class="term-line danger">&gt; 端点: ${escapeHtml(actualURL)}</div>
+        <div class="term-line danger">&gt; 错误详情: ${escapeHtml(data.error || data.reply || '上游响应失败')}</div>
+      `;
+      statusSerial.textContent = data.status ? `STATUS: ${data.status}_ERR` : 'STATUS: NET_ERR';
+    }
+  } catch (err) {
+    term.innerHTML += `
+      <div class="term-line danger">&gt; 请求异常: ${escapeHtml(err.message)}</div>
+    `;
+    statusSerial.textContent = 'STATUS: NETWORK_ERR';
+  } finally {
+    term.scrollTop = term.scrollHeight;
+    btn.disabled = false;
+  }
+}
+
+
+

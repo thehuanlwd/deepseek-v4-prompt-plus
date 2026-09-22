@@ -1414,6 +1414,226 @@ textarea {
   transform: translateY(0);
 }
 
+/* ── 气泡标题后的请求序号徽标 ── */
+.request-seq-badge {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  font-weight: bold;
+  color: var(--yorha-accent);
+  border: 1px solid var(--yorha-accent);
+  border-radius: 2px;
+  padding: 0 4px;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
+/* ── 导出诊断报告配置弹窗（YoRHa 军用终端规范） ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(44, 43, 37, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.modal-overlay.open {
+  opacity: 1;
+}
+
+/* 弹窗主体：FIGURE 卡片，直角实框 + 角标刻度 + 硬投影 */
+.modal-box {
+  position: relative;
+  width: 480px;
+  max-width: 92vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--yorha-bg);
+  border: 0.1rem solid var(--yorha-fg);
+  box-shadow: 0.5rem 0.5rem 0 rgba(44, 43, 37, 0.35);
+  /* 四角 L 形刻度标记（非闭合框线） */
+  background-image:
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent)),
+    linear-gradient(var(--yorha-accent), var(--yorha-accent));
+  background-repeat: no-repeat;
+  background-size: 0.9rem 0.1rem, 0.1rem 0.9rem, 0.9rem 0.1rem, 0.1rem 0.9rem,
+    0.9rem 0.1rem, 0.1rem 0.9rem, 0.9rem 0.1rem, 0.1rem 0.9rem;
+  background-position: left top, left top, right top, right top,
+    left bottom, left bottom, right bottom, right bottom;
+}
+
+/* 标题栏：FIGCAPTION 风格，重色底 + 亮米字 + 大写 + 刻度 */
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--yorha-fg);
+  color: var(--yorha-panel-highlight);
+  padding: 0.65rem 1rem;
+  border-bottom: 0.1rem solid var(--yorha-fg);
+  text-transform: uppercase;
+  letter-spacing: 0.18rem;
+  font-size: 0.82rem;
+  font-weight: bold;
+}
+
+.modal-header .cap-mark {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.modal-header .cap-mark::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  background-color: var(--yorha-accent);
+}
+
+.modal-header .yorha-drawer-close {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--yorha-panel-highlight) !important;
+  font-size: 0.72rem !important;
+  letter-spacing: 0.1rem;
+}
+
+/* 屏蔽全局 button:hover 的 ::after 填充 / ::before 边框 / 偏移阴影，避免 hover 背景错乱 */
+.modal-header .yorha-drawer-close::after,
+.modal-header .yorha-drawer-close::before {
+  display: none !important;
+}
+
+.modal-header .yorha-drawer-close:hover {
+  background-color: var(--yorha-panel-highlight) !important;
+  box-shadow: none !important;
+  color: var(--yorha-accent) !important;
+}
+
+.modal-body {
+  padding: 1.3rem 1.4rem 1.1rem;
+  overflow-y: auto;
+  /* 微型网格底，与主窗口 body 完全一致 */
+  background-image:
+    linear-gradient(to right, var(--yorha-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--yorha-grid) 1px, transparent 1px);
+  background-size: 0.3rem 0.3rem;
+}
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.85rem 1.4rem;
+  border-top: 0.1rem solid var(--yorha-fg);
+}
+
+/* 底部序列号读数 */
+.export-serial {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.05rem;
+  color: var(--yorha-fg-dim);
+  text-transform: uppercase;
+}
+
+/* 子区块：FIGCAPTION 小标题 + cite 指示块 */
+.export-section {
+  margin-bottom: 1.3rem;
+}
+
+.export-section:last-of-type {
+  margin-bottom: 0.4rem;
+}
+
+.export-section-cap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--yorha-fg);
+  background-color: transparent;
+  font-size: 0.72rem;
+  letter-spacing: 0.15rem;
+  text-transform: uppercase;
+  font-weight: bold;
+  padding: 0 0 0.45rem 0;
+  margin-bottom: 0.7rem;
+  border-bottom: 0.1rem solid var(--yorha-fg);
+}
+
+/* cite 指示块：前置小方块 */
+.export-section-cap::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  background-color: var(--yorha-accent);
+  flex-shrink: 0;
+}
+
+/* 表单字段（与设置页 .config-row 一致） */
+.export-field {
+  margin-bottom: 0;
+}
+
+.export-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: bold;
+  color: var(--yorha-fg-dim);
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05rem;
+}
+
+.export-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 1.6rem;
+}
+
+/* 单条导出选项：代码片 + 名称 + 开关滑块（与设置页 toggle 布局一致） */
+.export-opt-row {
+  display: grid;
+  grid-template-columns: 2.6rem 1fr auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.2rem;
+  border-bottom: 0.1rem solid var(--yorha-border);
+}
+
+/* 模块代码片（SYS / USR / TDEF …） */
+.opt-code {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.66rem;
+  font-weight: bold;
+  letter-spacing: 0.04rem;
+  color: var(--yorha-fg-dim);
+  border: 0.1rem solid var(--yorha-fg-dim);
+  padding: 0.05rem 0.15rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.opt-name {
+  font-size: 0.8rem;
+  color: var(--yorha-fg);
+  letter-spacing: 0.02rem;
+}
+
+
+
 /* ── Badge、Tooltip 与缓存等额外样式 ── */
 .badge {
   display: inline-block;
@@ -1609,4 +1829,571 @@ textarea {
 .status-paused {
   animation: yorha-breath 1.5s infinite ease-in-out;
   color: var(--yorha-accent) !important;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   ── 模型服务 (供应商管理) YoRHa 极简美学样式 ──
+════════════════════════════════════════════════════════════════════ */
+
+#models.page {
+  padding: 1.5rem 2rem 2rem 2rem;
+  height: 100%;
+  display: none;
+  box-sizing: border-box;
+}
+
+#models.page.active {
+  display: flex;
+}
+
+.models-container {
+  display: flex;
+  height: 100%;
+  gap: 1.5rem;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* ── 左栏：供应商列表 ── */
+.models-sidebar {
+  width: 300px;
+  border: 0.1rem solid var(--yorha-panel);
+  background-color: var(--yorha-config-card-bg);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.models-sidebar-header {
+  background-color: transparent;
+  padding: 1rem;
+  border-bottom: 0.1rem solid var(--yorha-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.models-sidebar-header-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  font-weight: bold;
+  letter-spacing: 0.1rem;
+  text-transform: uppercase;
+}
+
+.models-sidebar-search input {
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  background-color: var(--yorha-bg);
+  border: 1px solid var(--yorha-border);
+  color: var(--yorha-fg);
+  font-family: inherit;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.models-sidebar-search input:focus {
+  border-color: var(--yorha-fg);
+}
+
+.models-sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.provider-list-item {
+  padding: 0.85rem 1rem;
+  border-bottom: 0.05rem solid var(--yorha-border);
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  position: relative;
+}
+
+.provider-list-item:hover {
+  background-color: var(--yorha-table-tr-hover-bg, rgba(69, 65, 56, 0.08));
+}
+
+.provider-list-item.active {
+  background-color: var(--yorha-fg);
+  color: var(--yorha-panel-highlight);
+}
+
+.provider-list-item.active span,
+.provider-list-item.active div {
+  color: var(--yorha-panel-highlight) !important;
+}
+
+.provider-icon-badge {
+  width: 28px;
+  height: 28px;
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--yorha-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-family: monospace;
+  font-size: 11px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.provider-list-item.active .provider-icon-badge {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: var(--yorha-panel-highlight);
+  color: var(--yorha-panel-highlight);
+}
+
+.provider-info-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.provider-info-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-info-name {
+  font-size: 0.82rem;
+  font-weight: bold;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-external-tag {
+  font-size: 9px;
+  color: var(--yorha-accent) !important;
+  font-weight: bold;
+  letter-spacing: 0.05rem;
+}
+
+.models-sidebar-footer {
+  padding: 0.8rem 1rem;
+  border-top: 0.1rem solid var(--yorha-border);
+  background-color: transparent;
+}
+
+/* ── 右栏：卡片流动配置区 ── */
+.models-main-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  background: transparent;
+}
+
+.models-scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding-right: 0.5rem;
+}
+
+/* ── 协议 Tab 切换 ── */
+.protocol-tab-bar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.2rem;
+  border-bottom: 1px solid var(--yorha-border);
+  padding-bottom: 0.5rem;
+}
+
+.protocol-tab-btn {
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  color: var(--yorha-fg) !important;
+  padding: 0.35rem 0.9rem !important;
+  font-size: 0.78rem !important;
+  cursor: pointer;
+  letter-spacing: 0.05rem;
+  transition: all 0.15s;
+  box-shadow: none !important;
+}
+
+.protocol-tab-btn:hover {
+  background-color: var(--yorha-fg) !important;
+  color: var(--yorha-panel-highlight) !important;
+  border-color: var(--yorha-fg) !important;
+}
+
+.protocol-tab-btn.active {
+  background-color: var(--yorha-fg) !important;
+  color: var(--yorha-panel-highlight) !important;
+  border-color: var(--yorha-fg) !important;
+  font-weight: bold;
+}
+
+.protocol-tab-btn.active:hover {
+  background-color: var(--yorha-fg) !important;
+  color: var(--yorha-panel-highlight) !important;
+}
+
+.endpoint-code-preview {
+  display: inline-block;
+  font-family: monospace;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.04);
+  padding: 2px 6px;
+  border: 1px solid var(--yorha-border);
+  color: var(--yorha-fg);
+}
+
+/* ── 模型管理工具条 ── */
+.models-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+}
+
+.models-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.models-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* ── 穿透模式提示横幅 ── */
+.passthrough-banner {
+  border-left: 3px solid var(--yorha-accent);
+  background: rgba(205, 90, 63, 0.05);
+  border-top: 1px solid var(--yorha-border);
+  border-right: 1px solid var(--yorha-border);
+  border-bottom: 1px solid var(--yorha-border);
+  padding: 0.75rem 1rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  margin-bottom: 1.2rem;
+}
+
+.passthrough-head {
+  font-weight: bold;
+  font-size: 0.8rem;
+  color: var(--yorha-accent);
+  text-transform: uppercase;
+  margin-bottom: 0.15rem;
+}
+
+.passthrough-sub {
+  font-size: 0.75rem;
+  color: var(--yorha-fg-dim);
+  line-height: 1.4;
+}
+
+/* ── 模型分组与条目 ── */
+.model-groups-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.model-group-card {
+  border: 1px solid var(--yorha-panel);
+  background: transparent;
+}
+
+.model-group-header {
+  padding: 0.55rem 0.9rem;
+  background: rgba(0, 0, 0, 0.03);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--yorha-border);
+}
+
+.model-group-header:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.model-group-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: bold;
+  font-size: 0.8rem;
+  letter-spacing: 0.05rem;
+}
+
+.model-group-arrow {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 9px;
+}
+
+.model-group-card.collapsed .model-group-arrow {
+  transform: rotate(-90deg);
+}
+
+.model-group-card.collapsed .model-group-body {
+  display: none;
+}
+
+.model-group-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.model-item-row {
+  padding: 0.65rem 0.9rem;
+  border-bottom: 1px dashed var(--yorha-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  transition: background-color 0.15s;
+}
+
+.model-item-row:last-child {
+  border-bottom: none;
+}
+
+.model-item-row:hover {
+  background-color: rgba(69, 65, 56, 0.04);
+}
+
+.model-item-main {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.model-item-title-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-item-name {
+  font-size: 0.82rem;
+  font-weight: bold;
+  color: var(--yorha-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-item-id {
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--yorha-fg-dim);
+}
+
+.model-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+/* 模型的单独测试与删除按钮：轻量无杂质，平时隐藏，鼠标悬停到行上才显示 */
+.btn-model-test,
+.btn-model-remove {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease-in-out, background-color 0.15s, color 0.15s;
+  padding: 0.2rem 0.8rem !important;
+  font-size: 11px !important;
+  height: 28px !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  background-color: var(--yorha-panel) !important;
+  color: var(--yorha-fg) !important;
+  border: none !important;
+}
+
+.model-item-row:hover .btn-model-test,
+.model-item-row:hover .btn-model-remove {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 测试按钮自身悬停：黑底反白 */
+.btn-model-test:hover {
+  background-color: var(--yorha-fg) !important;
+  color: var(--yorha-panel-highlight) !important;
+}
+
+/* 删除按钮自身悬停：纯正红色反白警示 */
+.btn-model-remove:hover {
+  background-color: var(--yorha-accent) !important;
+  color: #fff !important;
+}
+
+.btn-model-remove:hover:after {
+  background-color: var(--yorha-accent) !important;
+}
+
+/* 寄叶极简终端复选框配套样式 (直角方块 + 实心微方块) */
+.yorha-checkbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.yorha-checkbox input[type="checkbox"],
+.fetched-model-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  background-color: var(--yorha-panel-highlight);
+  border: 1.5px solid var(--yorha-fg);
+  border-radius: 0;
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.yorha-checkbox input[type="checkbox"]:hover,
+.fetched-model-row input[type="checkbox"]:hover {
+  border-color: var(--yorha-accent);
+}
+
+.yorha-checkbox input[type="checkbox"]:checked,
+.fetched-model-row input[type="checkbox"]:checked {
+  background-color: var(--yorha-panel-highlight);
+  border-color: var(--yorha-fg);
+}
+
+.yorha-checkbox input[type="checkbox"]:checked::after,
+.fetched-model-row input[type="checkbox"]:checked::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  background-color: var(--yorha-fg);
+}
+
+.fetched-model-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px dashed var(--yorha-border);
+  transition: background-color 0.15s;
+  cursor: pointer;
+}
+
+.fetched-model-row:hover {
+  background-color: rgba(0, 0, 0, 0.03);
+}
+
+.fetched-model-row.selected {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+/* ── 终端日志控制台 (用于可用性测试) ── */
+.yorha-terminal-window {
+  border: 1px solid var(--yorha-border);
+  background-color: #1a1917;
+  color: #c5c2b3;
+  font-family: 'Consolas', 'Fira Code', monospace;
+  font-size: 11px;
+  margin-top: 0.8rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-header {
+  background-color: #272621;
+  padding: 0.4rem 0.8rem;
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid #3c3b33;
+  color: #8f8d81;
+  font-size: 10px;
+  letter-spacing: 0.05rem;
+}
+
+.terminal-body {
+  padding: 0.8rem 1rem;
+  max-height: 200px;
+  min-height: 120px;
+  overflow-y: auto;
+  line-height: 1.6;
+}
+
+.term-line {
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.term-line.info {
+  color: #8f8d81;
+}
+
+.term-line.request {
+  color: #79a6d2;
+}
+
+.term-line.success {
+  color: #5fb589;
+}
+
+.term-line.error {
+  color: #cd5a3f;
+}
+
+.term-line.content {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 4px 8px;
+  border-left: 2px solid #5fb589;
+  margin-top: 4px;
+}
+
+/* ── 抓取模型多选列表 ── */
+.fetched-models-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--yorha-border);
+  background: var(--yorha-bg);
+}
+
+.fetched-model-row {
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.fetched-model-row:hover {
+  background: rgba(0, 0, 0, 0.04);
 }

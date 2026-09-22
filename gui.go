@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed web
@@ -97,6 +100,12 @@ func handleGUI(w http.ResponseWriter, r *http.Request, l *Logger, cfg *SafeConfi
 		handleAPIGetConfig(w, r, cfg)
 	case path == "/config" && r.Method == "POST":
 		handleAPISaveConfig(w, r, cfg)
+	case path == "/providers/ping" && r.Method == "POST":
+		handleAPIProviderPing(w, r)
+	case path == "/providers/fetch-models" && r.Method == "POST":
+		handleAPIFetchModels(w, r)
+	case path == "/providers/test-llm" && r.Method == "POST":
+		handleAPIProviderTestLLM(w, r)
 	case path == "/restart" && r.Method == "POST":
 		handleAPIRestart(w, r)
 	default:
@@ -235,6 +244,28 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 						}
 					}
 					p.APIKey = k
+				}
+				if modelsRaw, ok := m["models"].([]interface{}); ok {
+					for _, mItem := range modelsRaw {
+						if mm, ok := mItem.(map[string]interface{}); ok {
+							mc := ModelConfig{}
+							if id, ok := mm["id"].(string); ok {
+								mc.ID = strings.TrimSpace(id)
+							}
+							if name, ok := mm["name"].(string); ok {
+								mc.Name = strings.TrimSpace(name)
+							}
+							if group, ok := mm["group"].(string); ok {
+								mc.Group = strings.TrimSpace(group)
+							}
+							if proto, ok := mm["protocol"].(string); ok {
+								mc.Protocol = strings.TrimSpace(proto)
+							}
+							if mc.ID != "" {
+								p.Models = append(p.Models, mc)
+							}
+						}
+					}
 				}
 					if p.Name == "" {
 						p.Name = "未命名供应商"
@@ -493,7 +524,19 @@ func handleAPIAnalysisExport(w http.ResponseWriter, r *http.Request, path string
 		return
 	}
 
-	md, err := svc.ExportMarkdown(id)
+	// 默认模板（导出全部）；若以 POST 提交 JSON 配置则按配置过滤。
+	cfg := defaultFullExportConfig()
+	if r.Method == "POST" {
+		if body, err := io.ReadAll(r.Body); err == nil && len(body) > 0 {
+			// 容忍前端传递 "full"/"lite" 模板标识：仅识别已知字段，未知字段忽略。
+			var posted ExportConfig
+			if json.Unmarshal(body, &posted) == nil {
+				cfg = &posted
+			}
+		}
+	}
+
+	md, err := svc.ExportMarkdown(id, cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -516,4 +559,389 @@ func handleAPIClearAnalysisHistory(w http.ResponseWriter, r *http.Request, svc *
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+}
+
+type providerPingReq struct {
+	BaseURL          string `json:"base_url"`
+	AnthropicBaseURL string `json:"anthropic_base_url"`
+	APIKey           string `json:"api_key"`
+	Protocol         string `json:"protocol"` // "openai" 或 "anthropic"
+}
+
+func handleAPIProviderPing(w http.ResponseWriter, r *http.Request) {
+	var req providerPingReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	targetURL := strings.TrimRight(req.BaseURL, "/")
+	if req.Protocol == "anthropic" {
+		if req.AnthropicBaseURL != "" {
+			targetURL = strings.TrimRight(req.AnthropicBaseURL, "/")
+		} else if strings.Contains(targetURL, "api.deepseek.com") && !strings.Contains(targetURL, "/anthropic") {
+			targetURL = targetURL + "/anthropic"
+		}
+	}
+
+	if targetURL == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":         false,
+			"error":      "基础地址不能为空",
+			"status":     0,
+			"latency_ms": 0,
+		})
+		return
+	}
+
+	testURL := joinUpstream(targetURL, "/v1/models")
+	if req.Protocol == "anthropic" {
+		testURL = targetURL
+	}
+
+	httpReq, err := http.NewRequest("GET", testURL, nil)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":         false,
+			"error":      fmt.Sprintf("创建请求失败: %v", err),
+			"status":     0,
+			"latency_ms": 0,
+		})
+		return
+	}
+
+	apiKey := req.APIKey
+	if strings.HasPrefix(apiKey, apiKeyEncPrefix) {
+		if dec, err := decryptAPIKey(apiKey); err == nil {
+			apiKey = dec
+		}
+	}
+
+	if apiKey != "" {
+		if req.Protocol == "anthropic" {
+			httpReq.Header.Set("x-api-key", apiKey)
+			httpReq.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+	}
+	httpReq.Header.Set("User-Agent", "DSPlus/1.0 PingRunner")
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":         false,
+			"error":      fmt.Sprintf("网络连接失败: %v", err),
+			"status":     0,
+			"latency_ms": latency,
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	isOK := resp.StatusCode >= 200 && resp.StatusCode < 300
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":          isOK,
+		"status":      resp.StatusCode,
+		"status_text": resp.Status,
+		"latency_ms":  latency,
+		"endpoint":    testURL,
+	})
+}
+
+type fetchModelsReq struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+}
+
+func handleAPIFetchModels(w http.ResponseWriter, r *http.Request) {
+	var req fetchModelsReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	baseURL := strings.TrimRight(req.BaseURL, "/")
+	if baseURL == "" {
+		http.Error(w, `{"error":"base_url is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	fetchURL := joinUpstream(baseURL, "/v1/models")
+	httpReq, err := http.NewRequest("GET", fetchURL, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to create request: %s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	apiKey := req.APIKey
+	if strings.HasPrefix(apiKey, apiKeyEncPrefix) {
+		if dec, err := decryptAPIKey(apiKey); err == nil {
+			apiKey = dec
+		}
+	}
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "DSPlus/1.0 ModelFetcher")
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  fmt.Sprintf("拉取失败: %v", err),
+			"models": []interface{}{},
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  fmt.Sprintf("读取响应失败: %v", err),
+			"models": []interface{}{},
+		})
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		errMsg := string(bodyBytes)
+		if len(errMsg) > 200 {
+			errMsg = errMsg[:200]
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  fmt.Sprintf("上游返回 HTTP %d: %s", resp.StatusCode, errMsg),
+			"models": []interface{}{},
+		})
+		return
+	}
+
+	var openAIResp struct {
+		Data []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &openAIResp); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  fmt.Sprintf("解析上游模型列表失败: %v", err),
+			"models": []interface{}{},
+		})
+		return
+	}
+
+	var results []ModelConfig
+	for _, item := range openAIResp.Data {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		group := "通用 (General)"
+		if strings.Contains(id, "/") {
+			parts := strings.Split(id, "/")
+			if parts[0] != "" {
+				group = parts[0]
+			}
+		} else if item.OwnedBy != "" && item.OwnedBy != "system" {
+			group = item.OwnedBy
+		}
+		results = append(results, ModelConfig{
+			ID:       id,
+			Name:     id,
+			Group:    group,
+			Protocol: "openai",
+		})
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"models": results,
+		"total":  len(results),
+	})
+}
+
+type providerTestLLMReq struct {
+	BaseURL          string `json:"base_url"`
+	AnthropicBaseURL string `json:"anthropic_base_url"`
+	APIKey           string `json:"api_key"`
+	Model            string `json:"model"`
+	Protocol         string `json:"protocol"` // "openai" 或 "anthropic"
+	Prompt           string `json:"prompt"`
+}
+
+func handleAPIProviderTestLLM(w http.ResponseWriter, r *http.Request) {
+	var req providerTestLLMReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	prompt := req.Prompt
+	if prompt == "" {
+		prompt = "连接测试，什么都别想，收到回复：收到了"
+	}
+
+	apiKey := req.APIKey
+	if strings.HasPrefix(apiKey, apiKeyEncPrefix) {
+		if dec, err := decryptAPIKey(apiKey); err == nil {
+			apiKey = dec
+		}
+	}
+
+	var targetURL string
+	var reqBody []byte
+	var httpReq *http.Request
+	var err error
+
+	if req.Protocol == "anthropic" {
+		base := req.AnthropicBaseURL
+		if base == "" {
+			base = req.BaseURL
+			if strings.Contains(base, "api.deepseek.com") && !strings.Contains(base, "/anthropic") {
+				base = strings.TrimRight(base, "/") + "/anthropic"
+			}
+		}
+		targetURL = joinUpstream(base, "/v1/messages")
+
+		payload := map[string]interface{}{
+			"model": req.Model,
+			"messages": []map[string]string{
+				{"role": "user", "content": prompt},
+			},
+			"max_tokens": 64,
+		}
+		reqBody, _ = json.Marshal(payload)
+		httpReq, err = http.NewRequest("POST", targetURL, bytes.NewReader(reqBody))
+		if err == nil {
+			if apiKey != "" {
+				httpReq.Header.Set("x-api-key", apiKey)
+			}
+			httpReq.Header.Set("anthropic-version", "2023-06-01")
+			httpReq.Header.Set("Content-Type", "application/json")
+		}
+	} else {
+		base := strings.TrimRight(req.BaseURL, "/")
+		targetURL = joinUpstream(base, "/v1/chat/completions")
+
+		payload := map[string]interface{}{
+			"model": req.Model,
+			"messages": []map[string]string{
+				{"role": "user", "content": prompt},
+			},
+			"max_tokens": 64,
+			"stream":     false,
+		}
+		reqBody, _ = json.Marshal(payload)
+		httpReq, err = http.NewRequest("POST", targetURL, bytes.NewReader(reqBody))
+		if err == nil {
+			if apiKey != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+		}
+	}
+
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":         false,
+			"error":      fmt.Sprintf("创建请求失败: %v", err),
+			"target_url": targetURL,
+			"status":     0,
+			"latency_ms": 0,
+		})
+		return
+	}
+
+	httpReq.Header.Set("User-Agent", "DSPlus/1.0 LLMTestRunner")
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":         false,
+			"error":      fmt.Sprintf("上游连接异常: %v", err),
+			"target_url": targetURL,
+			"status":     0,
+			"latency_ms": latency,
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":         false,
+			"error":      fmt.Sprintf("读取响应体失败: %v", err),
+			"target_url": targetURL,
+			"status":     resp.StatusCode,
+			"latency_ms": latency,
+		})
+		return
+	}
+
+	isOK := resp.StatusCode >= 200 && resp.StatusCode < 300
+	var reply string
+
+	if isOK {
+		var oaiResp struct {
+			Choices []struct {
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(respBytes, &oaiResp); err == nil {
+			if len(oaiResp.Choices) > 0 {
+				reply = oaiResp.Choices[0].Message.Content
+				if reply == "" {
+					reply = oaiResp.Choices[0].Message.ReasoningContent
+				}
+			} else if len(oaiResp.Content) > 0 {
+				for _, c := range oaiResp.Content {
+					if c.Type == "text" {
+						reply += c.Text
+					}
+				}
+			}
+		}
+		if reply == "" {
+			reply = string(respBytes)
+		}
+	} else {
+		reply = string(respBytes)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":          isOK,
+		"status":      resp.StatusCode,
+		"status_text": resp.Status,
+		"latency_ms":  latency,
+		"target_url":  targetURL,
+		"reply":       reply,
+		"error":       string(respBytes),
+	})
 }

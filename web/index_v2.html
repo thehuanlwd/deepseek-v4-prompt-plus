@@ -47,6 +47,17 @@
         </svg>
         <span data-i18n="nav.analysis">诊断分析</span>
       </button>
+      <button class="button" data-page="models">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+          stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="0" ry="0"></rect>
+          <line x1="8" y1="21" x2="16" y2="21"></line>
+          <line x1="12" y1="17" x2="12" y2="21"></line>
+          <line x1="7" y1="8" x2="17" y2="8"></line>
+          <line x1="7" y1="12" x2="13" y2="12"></line>
+        </svg>
+        <span data-i18n="nav.models">模型服务</span>
+      </button>
       <button class="button" data-page="settings">
         <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
           stroke-linecap="round" stroke-linejoin="round">
@@ -94,7 +105,8 @@
 
       <!-- 工具栏 -->
       <div class="dash-toolbar">
-        <input type="text" id="searchInput" placeholder="FILTER API LOG DATA..." data-i18n-placeholder="dashboard.filter_placeholder">
+        <input type="text" id="searchInput" placeholder="FILTER API LOG DATA..."
+          data-i18n-placeholder="dashboard.filter_placeholder">
         <button class="button button-accent" id="btnClear" data-i18n="dashboard.purge">
           Purge Log Data
         </button>
@@ -217,7 +229,8 @@
         <div class="session-list-panel">
           <div class="session-list-header">
             <span data-i18n="analysis.session_list">Session trace</span>
-            <button class="button" onclick="loadAnalysisSessions()" data-i18n="analysis.refresh" style="font-size: 0.75rem !important; padding: 0.2rem 0.6rem !important; height: auto; box-shadow: none !important;">刷新</button>
+            <button class="button" onclick="loadAnalysisSessions()" data-i18n="analysis.refresh"
+              style="font-size: 0.75rem !important; padding: 0.2rem 0.6rem !important; height: auto; box-shadow: none !important;">刷新</button>
           </div>
           <div class="session-list-body" id="sessionListContainer">
             <div class="empty-state" data-i18n="analysis.initial_loading">读取中...</div>
@@ -230,7 +243,8 @@
             <div>
               <h2 style="margin-bottom: 0; border: none; padding: 0;" id="ansSessionId">REPORT #--</h2>
               <div class="report-summary-bar">
-                <span><span data-i18n="analysis.summary_requests">请求数</span>: <span id="ansRequestCount">--</span></span>
+                <span><span data-i18n="analysis.summary_requests">请求数</span>: <span
+                    id="ansRequestCount">--</span></span>
                 <span><span data-i18n="analysis.summary_tokens">Tokens</span>: <span id="ansTokens">--</span></span>
                 <span><span data-i18n="analysis.summary_cache">缓存命中</span>: <span id="ansCacheRatio">--</span></span>
                 <span id="ansRetries" class="badge badge-antiloop-retry" style="display:none">0</span>
@@ -280,6 +294,174 @@
       </div>
     </section>
 
+    <!-- ── 模型服务页面 (供应商管理) ── -->
+    <section id="models" class="page">
+      <div class="models-container">
+        <!-- 左栏：供应商管理器 -->
+        <div class="models-sidebar">
+          <div class="models-sidebar-header">
+            <div class="models-sidebar-header-title">
+              <span data-i18n="models.providers_title">供应商服务</span>
+              <span class="badge" id="modelProviderCountBadge">3</span>
+            </div>
+            <div class="models-sidebar-search">
+              <input type="text" id="modelProviderSearchInput" placeholder="筛选供应商..."
+                data-i18n-placeholder="models.search_placeholder" oninput="filterProvidersListUI()">
+            </div>
+          </div>
+          <div class="models-sidebar-body" id="modelProviderListContainer">
+            <!-- 动态渲染供应商列表 -->
+          </div>
+          <div class="models-sidebar-footer">
+            <button type="button" class="button" onclick="openAddProviderModal()"
+              style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                stroke-linejoin="round" style="width:14px; height:14px;">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              <span data-i18n="models.add_provider">添加供应商</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 右栏：选中供应商的具体配置与模型路由控制台 -->
+        <div class="models-main-panel" id="modelsMainPanel">
+          <div class="models-scroll-body">
+            <!-- 板块 1: 供应商配置 -->
+            <div class="config-card">
+              <h2>供应商配置</h2>
+
+              <div class="config-row">
+                <label>供应商名称</label>
+                <div style="display: flex; gap: 0.8rem; align-items: center;">
+                  <input type="text" id="curProviderNameInput" value="DeepSeek 官方"
+                    oninput="onCurProviderNameChange(this.value)" style="flex: 1;">
+                  <button type="button" class="button button-accent" onclick="deleteCurrentModelProvider()" style="height: 34.67px; padding: 0 1.2rem; flex-shrink: 0;">
+                    删除
+                  </button>
+                </div>
+                <div class="hint" style="margin-top: 0.4rem;">在左侧供应商列表中切换对外提供服务的供应商</div>
+              </div>
+
+              <div class="config-row" style="margin-top: 1.5rem;">
+                <label data-i18n="models.api_key">API 密钥 (API Key)</label>
+                <div style="display: flex; gap: 0.8rem; align-items: center;">
+                  <div class="yorha-password-input" style="flex: 1;">
+                    <input type="password" id="curProviderApiKey" placeholder="sk-..." value="sk-d98f7e2a9b4c8102374e6f"
+                      oninput="syncAndAutoSaveProviderData()">
+                    <button type="button" class="yorha-eye-btn" onclick="toggleModelApiKeyVisibility()"
+                      aria-label="切换明密文">
+                      <svg class="eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path>
+                        <circle cx="12" cy="12" r="3"></circle>
+                      </svg>
+                      <svg class="eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path
+                          d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24">
+                        </path>
+                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                      </svg>
+                    </button>
+                  </div>
+                  <button type="button" class="button" id="btnPingApi" onclick="testProviderPing()"
+                    style="height: 34.67px; padding: 0 1.2rem; flex-shrink: 0;">
+                    连通性测试
+                  </button>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.4rem;">
+                  <span class="hint" data-i18n="models.api_key_hint">密钥以加密形式保存在本地 config.json 中</span>
+                  <span id="providerPingStatusChip" class="badge" style="display:none; font-family: monospace;"></span>
+                </div>
+              </div>
+
+              <!-- 主菜单 Tab 切换基础 URL 与 Anthropic URL -->
+              <div class="protocol-tab-bar" style="margin-top: 1.5rem;">
+                <button type="button" class="protocol-tab-btn active" id="tabOpenAI"
+                  onclick="switchEndpointTab('openai')">
+                  基础地址 (OpenAI 兼容)
+                </button>
+                <button type="button" class="protocol-tab-btn" id="tabAnthropic"
+                  onclick="switchEndpointTab('anthropic')">
+                  Anthropic 专用地址
+                </button>
+              </div>
+
+              <div id="paneOpenAI" class="protocol-pane active">
+                <div class="config-row" style="margin-bottom: 0.4rem;">
+                  <label data-i18n="models.base_url">基础地址 (Base URL)</label>
+                  <input type="text" id="curProviderBaseUrl" placeholder="https://api.deepseek.com"
+                    value="https://api.deepseek.com" oninput="syncAndAutoSaveProviderData()">
+                  <div class="hint" style="margin-top: 0.4rem;">
+                    端点预览: <code id="previewOpenAI"
+                      class="endpoint-code-preview">https://api.deepseek.com/v1/chat/completions</code>
+                  </div>
+                </div>
+              </div>
+
+              <div id="paneAnthropic" class="protocol-pane" style="display: none;">
+                <div class="config-row" style="margin-bottom: 0.4rem;">
+                  <label data-i18n="models.anthropic_url">Anthropic 专用地址 (可选)</label>
+                  <input type="text" id="curProviderAnthropicUrl" placeholder="https://api.deepseek.com/anthropic"
+                    value="https://api.deepseek.com/anthropic" oninput="syncAndAutoSaveProviderData()">
+                  <div class="hint" style="margin-top: 0.4rem;">
+                    端点预览: <code id="previewAnthropic"
+                      class="endpoint-code-preview">https://api.deepseek.com/anthropic/v1/messages</code>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 板块 3: 模型路由管理 -->
+            <div class="config-card">
+              <div style="display: flex; justify-content: space-between; align-items: baseline; border-bottom: 0.1rem solid var(--yorha-border); margin-bottom: 1.5rem;">
+                <h2 style="border: none; margin-bottom: 0; padding-bottom: 0.5rem;">模型路由管理</h2>
+                <span class="badge" id="modelsCountBadge" style="font-size: 11px;">0 (默认穿透)</span>
+              </div>
+
+              <div class="models-toolbar">
+                <div class="models-toolbar-left" style="flex: 1;">
+                  <input type="text" id="modelSearchInput" placeholder="筛选已配置的模型..." oninput="filterModelsListUI()" style="width: 100%; max-width: 320px;">
+                </div>
+                <div class="models-toolbar-right">
+                  <button type="button" class="button" onclick="openFetchModelsModal()">
+                    获取模型列表
+                  </button>
+                  <button type="button" class="button" onclick="openCustomModelModal()">
+                    自定义添加
+                  </button>
+                </div>
+              </div>
+
+              <!-- 默认穿透通知横幅 (当模型列表为空时展示) -->
+              <div class="passthrough-banner" id="passthroughBanner">
+                <div class="passthrough-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" style="width:18px;height:18px;color:var(--yorha-accent);">
+                    <polyline points="13 17 18 12 13 7"></polyline>
+                    <polyline points="6 17 11 12 6 7"></polyline>
+                  </svg>
+                </div>
+                <div class="passthrough-text">
+                  <div class="passthrough-head">穿透模式激活中</div>
+                  <div class="passthrough-sub">
+                    当前未限制任何模型。客户端发往本地端口的所有模型请求将默认原样转发给上游，保持全模型兼容。
+                  </div>
+                </div>
+              </div>
+
+              <!-- 分组模型列表展示容器 -->
+              <div class="model-groups-wrapper" id="modelGroupsWrapper">
+                <!-- 动态渲染分组折叠与模型项 -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 设置选项页面 -->
     <section id="settings" class="page">
       <div class="config-scroll-area">
@@ -294,10 +476,18 @@
               <label data-i18n="settings.active_provider">当前供应商</label>
               <div class="provider-select-row">
                 <select id="cfgActiveProvider" onchange="onActiveProviderChange()"></select>
-                <button type="button" class="button" onclick="addProvider()" data-i18n="settings.provider_add">新增</button>
-                <button type="button" class="button button-accent" onclick="deleteProvider()" data-i18n="settings.provider_delete">删除</button>
+                <button type="button" class="button" onclick="addProvider()"
+                  data-i18n="settings.provider_add">新增</button>
+                <button type="button" class="button button-accent" onclick="deleteProvider()"
+                  data-i18n="settings.provider_delete">删除</button>
               </div>
-  </div>
+              <div class="hint" style="margin-top: 0.6rem; display: flex; align-items: center; justify-content: space-between;">
+                <span>提示：可在导航切换至 [模型服务] 进行多供应商测速、模型白名单与路由管理</span>
+                <button type="button" class="button" onclick="document.querySelector('.yorha-nav button[data-page=\'models\']').click()" style="font-size: 11px; padding: 2px 8px; height: auto;">
+                  进入模型服务
+                </button>
+              </div>
+            </div>
 
             <!-- 当前供应商编辑区 -->
             <div id="providerEditor">
@@ -308,12 +498,14 @@
 
               <div class="config-row">
                 <label data-i18n="settings.provider_base">基础地址 (Base URL)</label>
-                <input type="text" id="cfgProviderBase" placeholder="https://api.deepseek.com" oninput="syncProviderFromEditor()">
+                <input type="text" id="cfgProviderBase" placeholder="https://api.deepseek.com"
+                  oninput="syncProviderFromEditor()">
               </div>
 
               <div class="config-row">
                 <label data-i18n="settings.provider_anthropic_base">Anthropic 专用地址（可选）</label>
-                <input type="text" id="cfgProviderAnthropicBase" placeholder="https://api.deepseek.com/anthropic" oninput="syncProviderFromEditor()">
+                <input type="text" id="cfgProviderAnthropicBase" placeholder="https://api.deepseek.com/anthropic"
+                  oninput="syncProviderFromEditor()">
               </div>
 
               <div class="config-row">
@@ -329,7 +521,9 @@
                     </svg>
                     <svg class="eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                       stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                      <path
+                        d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24">
+                      </path>
                       <line x1="1" y1="1" x2="23" y2="23"></line>
                     </svg>
                   </button>
@@ -408,8 +602,8 @@
 
             <div class="config-row" id="extraPromptGroup" style="display:none">
               <label data-i18n="settings.extra_prompt">注入的最高准则内容</label>
-              <textarea id="cfgExtraPrompt" rows="8"
-                placeholder="此处填写额外的最高优先级指令...&#10;将拼接到 System Prompt 之后，作为最高准则执行" data-i18n-placeholder="settings.extra_prompt_placeholder"></textarea>
+              <textarea id="cfgExtraPrompt" rows="8" placeholder="此处填写额外的最高优先级指令...&#10;将拼接到 System Prompt 之后，作为最高准则执行"
+                data-i18n-placeholder="settings.extra_prompt_placeholder"></textarea>
             </div>
           </div>
 
@@ -452,7 +646,8 @@
             <div class="toggle-container">
               <div class="toggle-info">
                 <span class="toggle-title" data-i18n="settings.auto_fix_empty">空 content 自动修复</span>
-                <span class="toggle-desc" data-i18n="settings.auto_fix_empty_desc">把历史中空的 assistant content 用 reasoning 回填，避免循环请求</span>
+                <span class="toggle-desc" data-i18n="settings.auto_fix_empty_desc">把历史中空的 assistant content 用 reasoning
+                  回填，避免循环请求</span>
               </div>
               <label class="yorha-switch">
                 <input type="checkbox" id="cfgAutoFixEmpty">
@@ -463,7 +658,8 @@
             <div class="toggle-container">
               <div class="toggle-info">
                 <span class="toggle-title" data-i18n="settings.anti_hallucination">防幻觉 (意图校准)</span>
-                <span class="toggle-desc" data-i18n="settings.anti_hallucination_desc">在模型思考完、准备输出正式回答前强行注入最新用户意图进行校准</span>
+                <span class="toggle-desc"
+                  data-i18n="settings.anti_hallucination_desc">在模型思考完、准备输出正式回答前强行注入最新用户意图进行校准</span>
               </div>
               <label class="yorha-switch">
                 <input type="checkbox" id="cfgAntiHallucination">
@@ -478,7 +674,8 @@
                 <label style="margin-bottom: 0.2rem;" data-i18n="settings.anti_hallucination_prompt">校准提示语模板</label>
                 <textarea id="cfgAntiHallucinationPrompt" rows="3"
                   style="width: 100%; background: var(--yorha-bg-depth); color: var(--yorha-fg); border: 1px solid var(--yorha-border); padding: 0.5rem; font-family: monospace; resize: vertical; box-sizing: border-box;"></textarea>
-                <div class="hint" data-i18n="settings.anti_hallucination_prompt_hint">使用 {{latest_user_message}} 代表最新的一条用户消息</div>
+                <div class="hint" data-i18n="settings.anti_hallucination_prompt_hint">使用 {{latest_user_message}}
+                  代表最新的一条用户消息</div>
               </div>
             </div>
 
@@ -499,8 +696,10 @@
               <div class="config-row">
                 <label data-i18n="settings.antiloop_retry_model">重试模型</label>
                 <select id="cfgAntiloopRetryModel">
-                  <option value="deepseek-v4-flash" data-i18n="settings.antiloop_retry_model.flash">deepseek-v4-flash (快速)</option>
-                  <option value="deepseek-v4-pro" data-i18n="settings.antiloop_retry_model.pro">deepseek-v4-pro (强力)</option>
+                  <option value="deepseek-v4-flash" data-i18n="settings.antiloop_retry_model.flash">deepseek-v4-flash
+                    (快速)</option>
+                  <option value="deepseek-v4-pro" data-i18n="settings.antiloop_retry_model.pro">deepseek-v4-pro (强力)
+                  </option>
                 </select>
               </div>
               <div class="config-row">
@@ -583,7 +782,8 @@
                       onclick="stepValue('cfgAnalysisRetentionDays', 1, 1, 365)">+</button>
                   </div>
                   <button type="button" class="button button-accent" onclick="clearAnalysisHistory()"
-                    style="font-size: 0.75rem; padding: 0 1rem; height: 2.2rem; box-shadow: none !important;" data-i18n="settings.analysis_clear">
+                    style="font-size: 0.75rem; padding: 0 1rem; height: 2.2rem; box-shadow: none !important;"
+                    data-i18n="settings.analysis_clear">
                     清除历史记录
                   </button>
                 </div>
@@ -626,16 +826,261 @@
         <!-- 重启服务横幅 -->
         <div id="restartBanner"
           style="display:none; display: flex; align-items: center; gap: 1rem; font-size: 0.8rem; margin-left: 2rem;">
-          <span style="color: var(--yorha-accent); font-weight: bold;" data-i18n="actions.restart_required">[ RESTART REQUIRED ]</span>
-          <span id="restartReasonText" style="color: var(--yorha-fg-dim);" data-i18n="actions.restart_reason">设置已保存，重启服务后生效。</span>
+          <span style="color: var(--yorha-accent); font-weight: bold;" data-i18n="actions.restart_required">[ RESTART
+            REQUIRED ]</span>
+          <span id="restartReasonText" style="color: var(--yorha-fg-dim);"
+            data-i18n="actions.restart_reason">设置已保存，重启服务后生效。</span>
           <button class="button button-accent" id="btnRestartService" onclick="restartService()"
-            style="padding: 0.3rem 0.8rem; font-size: 0.75rem; box-shadow: none !important;" data-i18n="actions.restart">
+            style="padding: 0.3rem 0.8rem; font-size: 0.75rem; box-shadow: none !important;"
+            data-i18n="actions.restart">
             重启服务
           </button>
         </div>
       </div>
     </section>
   </main>
+
+  <!-- ── 导出诊断报告配置弹窗 ── -->
+  <div class="modal-overlay" id="exportModal" style="display:none;"
+    onclick="if(event.target===this) closeExportModal()">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="cap-mark">[ <span data-i18n="analysis.export_title">导出诊断报告</span> ]</span>
+        <button class="yorha-drawer-close" onclick="closeExportModal()">[ 关闭 // CLOSE ]</button>
+      </div>
+      <div class="modal-body">
+        <div class="export-section">
+          <div class="export-section-cap"><span data-i18n="analysis.export_template">导出模板</span></div>
+          <div class="export-field">
+            <select id="exportTemplateSelect">
+              <option value="full" data-i18n="analysis.export_full">默认（全部）</option>
+              <option value="lite" data-i18n="analysis.export_lite">精简</option>
+            </select>
+          </div>
+        </div>
+        <div class="export-section">
+          <div class="export-section-cap"><span data-i18n="analysis.export_sections">导出内容</span></div>
+          <div class="export-options" id="exportOptions">
+            <div class="export-opt-row">
+              <span class="opt-code">SYS</span>
+              <span class="opt-name" data-i18n="analysis.sec_system_prompt">系统提示词</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="system_prompt"><span
+                  class="yorha-slider"></span></label>
+            </div>
+            <div class="export-opt-row">
+              <span class="opt-code">USR</span>
+              <span class="opt-name" data-i18n="analysis.sec_user_message">用户消息</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="user_message"><span
+                  class="yorha-slider"></span></label>
+            </div>
+            <div class="export-opt-row">
+              <span class="opt-code">TDEF</span>
+              <span class="opt-name" data-i18n="analysis.sec_tool_prompt">工具提示词</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="tool_prompt"><span
+                  class="yorha-slider"></span></label>
+            </div>
+            <div class="export-opt-row">
+              <span class="opt-code">RSN</span>
+              <span class="opt-name" data-i18n="analysis.sec_reasoning">AI 思考推理过程</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="reasoning"><span
+                  class="yorha-slider"></span></label>
+            </div>
+            <div class="export-opt-row">
+              <span class="opt-code">TCL</span>
+              <span class="opt-name" data-i18n="analysis.sec_tool_call">AI 工具调用命令</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="tool_call"><span
+                  class="yorha-slider"></span></label>
+            </div>
+            <div class="export-opt-row">
+              <span class="opt-code">TRS</span>
+              <span class="opt-name" data-i18n="analysis.sec_tool_result">AI 工具返回内容</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="tool_result"><span
+                  class="yorha-slider"></span></label>
+            </div>
+            <div class="export-opt-row">
+              <span class="opt-code">CNT</span>
+              <span class="opt-name" data-i18n="analysis.sec_content">AI 回复正文</span>
+              <label class="yorha-switch"><input type="checkbox" data-sec="content"><span
+                  class="yorha-slider"></span></label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div style="display:flex; gap:0.8rem;">
+          <button type="button" class="button" style="background-color: transparent; border: 1px solid var(--yorha-fg);"
+            onclick="closeExportModal()" data-i18n="actions.cancel">取消</button>
+          <button type="button" class="button button-accent" onclick="confirmExport()"
+            data-i18n="analysis.export_confirm">导出</button>
+        </div>
+        <span class="export-serial" id="exportSerial">ID: ----</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 模态弹窗 1: 获取模型列表 ── -->
+  <div class="modal-overlay" id="fetchModelsModal" style="display:none;"
+    onclick="if(event.target===this) closeFetchModelsModal()">
+    <div class="modal-box" style="width: 580px; max-width: 90vw;">
+      <div class="modal-header">
+        <span class="cap-mark">[ <span data-i18n="models.fetch_modal_title">从上游抓取可用模型</span> ]</span>
+        <button class="yorha-drawer-close" onclick="closeFetchModelsModal()">[ 关闭 // CLOSE ]</button>
+      </div>
+      <div class="modal-body">
+        <div style="margin-bottom: 0.8rem; font-size: 11px; color: var(--yorha-fg-dim);">
+          发起 GET /v1/models 查询当前上游服务公布的模型清单，勾选后即可导入当前供应商的白名单路由：
+        </div>
+        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.8rem;">
+          <input type="text" id="fetchSearchInput" placeholder="过滤抓取到的模型..." style="flex:1;"
+            oninput="filterFetchedModelsUI()">
+          <button type="button" class="button" onclick="refreshFetchedModels()" style="font-size: 0.75rem;">[ 重新拉取
+            ]</button>
+        </div>
+        <div class="fetched-models-list" id="fetchedModelsList">
+          <!-- 动态列出拉取的模型 -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div style="display:flex; gap:0.8rem;">
+          <button type="button" class="button" style="background-color: transparent; border: 1px solid var(--yorha-fg);"
+            onclick="closeFetchModelsModal()" data-i18n="actions.cancel">取消</button>
+          <button type="button" class="button button-accent" onclick="confirmImportFetchedModels()"
+            data-i18n="models.fetch_modal_import">添加选中模型</button>
+        </div>
+        <span class="export-serial" id="fetchedSelectedCount">已选: 0</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 模态弹窗 2: 手动自定义添加模型 ── -->
+  <div class="modal-overlay" id="customModelModal" style="display:none;"
+    onclick="if(event.target===this) closeCustomModelModal()">
+    <div class="modal-box" style="width: 480px; max-width: 90vw;">
+      <div class="modal-header">
+        <span class="cap-mark">[ <span data-i18n="models.custom_modal_title">自定义添加模型</span> ]</span>
+        <button class="yorha-drawer-close" onclick="closeCustomModelModal()">[ 关闭 // CLOSE ]</button>
+      </div>
+      <div class="modal-body">
+        <div class="config-row">
+          <label data-i18n="models.custom_id">模型 ID (如 deepseek-chat)</label>
+          <input type="text" id="customModelId" placeholder="deepseek-ai/deepseek-v4-pro"
+            oninput="onCustomModelIdInput(this.value)">
+        </div>
+        <div class="config-row">
+          <label data-i18n="models.custom_name">模型显示名称 (可选)</label>
+          <input type="text" id="customModelName" placeholder="DeepSeek V4 Pro">
+        </div>
+        <div class="config-row">
+          <label data-i18n="models.custom_group">模型分组 (可选，留空按前缀自动分组)</label>
+          <input type="text" id="customModelGroup" placeholder="deepseek-ai (留空则自动提取)">
+          <div class="hint">若填入已有分组则自动归并，未填则根据模型 ID 中的斜杠前缀自动分组</div>
+        </div>
+        <div class="config-row">
+          <label data-i18n="models.custom_protocol">协议类型</label>
+          <select id="customModelProtocol">
+            <option value="openai">OpenAI 兼容格式 (标准)</option>
+            <option value="anthropic">Anthropic 原生格式 (/v1/messages)</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div style="display:flex; gap:0.8rem;">
+          <button type="button" class="button" style="background-color: transparent; border: 1px solid var(--yorha-fg);"
+            onclick="closeCustomModelModal()" data-i18n="actions.cancel">取消</button>
+          <button type="button" class="button button-accent" onclick="confirmAddCustomModel()"
+            data-i18n="models.custom_confirm">确认添加</button>
+        </div>
+        <span class="export-serial">CUSTOM-ADD</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 模态弹窗 3: 添加新供应商 ── -->
+  <div class="modal-overlay" id="addProviderModal" style="display:none;"
+    onclick="if(event.target===this) closeAddProviderModal()">
+    <div class="modal-box" style="width: 460px; max-width: 90vw;">
+      <div class="modal-header">
+        <span class="cap-mark">[ 新增供应商服务 // NEW PROVIDER ]</span>
+        <button class="yorha-drawer-close" onclick="closeAddProviderModal()">[ 关闭 // CLOSE ]</button>
+      </div>
+      <div class="modal-body">
+        <div class="config-row">
+          <label>供应商模板预设</label>
+          <select id="newProviderPreset" onchange="applyProviderPreset(this.value)">
+            <option value="custom">自定义供应商 (Custom)</option>
+            <option value="deepseek">DeepSeek 官方 (api.deepseek.com)</option>
+            <option value="nvidia">NVIDIA Integrate (integrate.api.nvidia.com)</option>
+            <option value="gemini">Google Gemini (generativelanguage.googleapis.com)</option>
+            <option value="groq">Groq Cloud (api.groq.com)</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label>供应商名称</label>
+          <input type="text" id="newProviderName" placeholder="例如: DeepSeek 备用">
+        </div>
+        <div class="config-row">
+          <label>基础地址 (Base URL)</label>
+          <input type="text" id="newProviderBaseUrl" placeholder="https://api.example.com">
+        </div>
+        <div class="config-row">
+          <label>API Key</label>
+          <input type="password" id="newProviderApiKey" placeholder="sk-...">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div style="display:flex; gap:0.8rem;">
+          <button type="button" class="button" style="background-color: transparent; border: 1px solid var(--yorha-fg);"
+            onclick="closeAddProviderModal()" data-i18n="actions.cancel">取消</button>
+          <button type="button" class="button button-accent" onclick="confirmAddNewProvider()">确认新增</button>
+        </div>
+        <span class="export-serial">PROVIDER-NEW</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 模态弹窗 4: 最小通用 LLM 可用性测试控制台 ── -->
+  <div class="modal-overlay" id="llmTestModal" style="display:none;"
+    onclick="if(event.target===this) closeLlmTestModal()">
+    <div class="modal-box" style="width: 640px; max-width: 92vw;">
+      <div class="modal-header">
+        <span class="cap-mark">[ <span data-i18n="models.test_modal_title">LLM 最小可用性测试终端</span> ]</span>
+        <button class="yorha-drawer-close" onclick="closeLlmTestModal()">[ 关闭 // CLOSE ]</button>
+      </div>
+      <div class="modal-body">
+        <div style="display:flex; justify-content:space-between; margin-bottom: 0.6rem; font-size: 11px;">
+          <span>测试目标模型: <strong id="testModalModelName" style="color:var(--yorha-accent);">--</strong></span>
+          <span>目标协议: <span id="testModalProtocol" class="badge">OPENAI</span></span>
+        </div>
+
+        <div class="config-row" style="margin-bottom: 0.6rem;">
+          <label data-i18n="models.test_modal_prompt_label">测试通用提示词 (最小化通用用例)</label>
+          <input type="text" id="testModalPromptInput" value="连接测试，什么都别想，收到回复：收到了" readonly
+            style="font-family: monospace; background: rgba(0,0,0,0.03);">
+          <div class="hint">发送严格最小化的 LLM ChatCompletion 请求，去除所有非必要参数以保障跨供应商极致兼容性</div>
+        </div>
+
+        <!-- 终端日志控制台 -->
+        <div class="yorha-terminal-window">
+          <div class="terminal-header">
+            <span>TERMINAL RUNNER // PORT: 8188</span>
+            <span id="terminalClock">READY</span>
+          </div>
+          <div class="terminal-body" id="llmTerminalBody">
+            <div class="term-line info">&gt; Ready for test invocation...</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div style="display:flex; gap:0.8rem;">
+          <button type="button" class="button" style="background-color: transparent; border: 1px solid var(--yorha-fg);"
+            onclick="closeLlmTestModal()" data-i18n="actions.cancel">关闭</button>
+          <button type="button" class="button button-accent" id="btnRunLlmTest" onclick="runMinimalLlmTest()"
+            data-i18n="models.test_modal_exec">发起测试 RUN</button>
+        </div>
+        <span class="export-serial" id="llmTestSerial">STATUS: IDLE</span>
+      </div>
+    </div>
+  </div>
 
   <!-- ── 寄叶系统警报 ── -->
   <div class="yorha-alert-banner" id="yorhaAlert">
