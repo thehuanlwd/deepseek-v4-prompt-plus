@@ -197,36 +197,43 @@ func (l *Logger) UpdateTotalMs(id int64, totalMs int64) {
 }
 
 // recomputeRate 依据「输出 tokens（含思考）/（总耗时 - 首响）」回填单请求 token 速率（token/秒）。
-// 当 TotalMs 或 TokenUsage 尚未齐备、或分母非正时直接跳过，待下一次更新补齐。
+// 严格限制：仅对流式输出（Stream == true）且生成阶段耗时大于等于 200ms 的请求进行计算；
+// 非流式请求的生成耗时包含在首响中，其 TotalMs-LatencyMs 仅为网络读包耗时，严禁计算误导。
 func (l *Logger) recomputeRate(i int) {
 	e := &l.entries[i]
-	if e.TokenUsage == nil || e.TokenUsage.Completion <= 0 {
+	if !e.Stream || e.TokenUsage == nil || e.TokenUsage.Completion <= 0 {
+		e.TokensPerSec = 0
 		return
 	}
-	denomMs := e.TotalMs - e.LatencyMs // 总耗时 - 首响 = 生成阶段耗时
-	if denomMs <= 0 {
+	denomMs := e.TotalMs - e.LatencyMs // 总耗时 - 首响 = 解码生成阶段耗时
+	if denomMs < 200 { // 过滤小于 200ms 的极短请求，避免超小分母极端离群值
+		e.TokensPerSec = 0
 		return
 	}
 	e.TokensPerSec = float64(e.TokenUsage.Completion) / (float64(denomMs) / 1000.0)
 }
 
-// AvgOutputTokensPerSec 返回首页列表内各请求 token 速率的算术平均（token/秒），
-// 即每个请求单独算 (输出tokens(含思考) / (总耗时-首响))，再对列表内所有可计算请求取平均。
+// AvgOutputTokensPerSec 按照业界标准（总量加权解码吞吐率），
+// 即：所有有效流式请求的总输出 Tokens / 总有效解码生成秒数。
+// 彻底杜绝算术平均被短分母异常点带飞的问题。
 func (l *Logger) AvgOutputTokensPerSec() float64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	var sum float64
-	var count int
+	var totalCompletion int64
+	var totalDenomMs int64
 	for _, e := range l.entries {
-		if e.TokensPerSec > 0 {
-			sum += e.TokensPerSec
-			count++
+		if e.Stream && e.TokenUsage != nil && e.TokenUsage.Completion > 0 {
+			denomMs := e.TotalMs - e.LatencyMs
+			if denomMs >= 200 {
+				totalCompletion += e.TokenUsage.Completion
+				totalDenomMs += denomMs
+			}
 		}
 	}
-	if count == 0 {
+	if totalDenomMs <= 0 || totalCompletion <= 0 {
 		return 0
 	}
-	return sum / float64(count)
+	return float64(totalCompletion) / (float64(totalDenomMs) / 1000.0)
 }
 
 func (l *Logger) UpdateSemanticType(id int64, semanticType string) {
@@ -263,6 +270,16 @@ func (l *Logger) Subscribe() <-chan LogEntry {
 	return l.subscriber
 }
 
+// ToSummary 返回剔除大体积 Body 和复杂审计的轻量级摘要对象，专供列表与 WebSocket 广播
+func (e LogEntry) ToSummary() LogEntry {
+	copy := e
+	copy.OriginalBody = ""
+	copy.TransformedBody = ""
+	copy.ResponseBody = ""
+	copy.RequestAudit = nil
+	return copy
+}
+
 func (l *Logger) GetAll(limit, offset int) []LogEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -281,7 +298,7 @@ func (l *Logger) GetAll(limit, offset int) []LogEntry {
 
 	result := make([]LogEntry, end-start)
 	for i, entry := range l.entries[start:end] {
-		entryCopy := entry
+		entryCopy := entry.ToSummary()
 		if entryCopy.TokenUsage != nil {
 			usageCopy := *entryCopy.TokenUsage
 			entryCopy.TokenUsage = &usageCopy
@@ -338,6 +355,10 @@ func (l *Logger) Stats() map[string]int {
 	total := len(l.entries)
 	today := 0
 	totalTokens := 0
+	promptTokens := 0
+	completionTokens := 0
+	cacheHitTokens := 0
+	cacheMissTokens := 0
 	now := time.Now()
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
@@ -347,13 +368,21 @@ func (l *Logger) Stats() map[string]int {
 		}
 		if e.TokenUsage != nil {
 			totalTokens += int(e.TokenUsage.Total)
+			promptTokens += int(e.TokenUsage.Prompt)
+			completionTokens += int(e.TokenUsage.Completion)
+			cacheHitTokens += int(e.TokenUsage.CacheHit)
+			cacheMissTokens += int(e.TokenUsage.CacheMiss)
 		}
 	}
 
 	return map[string]int{
-		"total":       total,
-		"today":       today,
-		"total_tokens": totalTokens,
+		"total":             total,
+		"today":             today,
+		"total_tokens":      totalTokens,
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"cache_hit_tokens":  cacheHitTokens,
+		"cache_miss_tokens": cacheMissTokens,
 	}
 }
 

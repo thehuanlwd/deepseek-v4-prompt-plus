@@ -687,7 +687,7 @@ func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format str
 	delete(data, "max_tokens")
 
 	// 3. Apply retry thinking configuration
-	s.applyRetryThinking(data, analysis)
+	s.applyRetryThinking(data, format, analysis)
 
 	// 4. Append Phase 1 context as new messages
 	s.injectRetryContext(data, format, phase1Content, reasoningContent, analysis, earlyStop)
@@ -699,13 +699,13 @@ func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format str
 	return b
 }
 
-// applyRetryThinking sets thinking/effort on the retry request based on config + analysis.
-func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, analysis *AntiLoopAnalysis) {
+// applyRetryThinking sets thinking/effort on the retry request based on config + analysis and request format.
+func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, format string, analysis *AntiLoopAnalysis) {
 	cfg := s.config.Get()
 	mode := cfg.AntiLoopRetryThinking
 	if mode == "" {
-		// Not set: use analyzer's recommendation
-		if !analysis.EnableThinking {
+		// Not set: use analyzer's recommendation (or disable thinking if analysis is nil / recommends disabled)
+		if analysis == nil || !analysis.EnableThinking {
 			data["thinking"] = map[string]interface{}{"type": "disabled"}
 			delete(data, "reasoning_effort")
 			delete(data, "output_config")
@@ -714,11 +714,24 @@ func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, analysis *
 	}
 	if mode == "disabled" {
 		data["thinking"] = map[string]interface{}{"type": "disabled"}
-		delete(data, "reasoning_effort")
+		data["reasoning_effort"] = "none"
+		data["reasoning"] = map[string]interface{}{"effort": "none"}
 		delete(data, "output_config")
 	} else if mode == "enabled" {
-		data["thinking"] = map[string]interface{}{"type": "enabled"}
-		data["reasoning_effort"] = cfg.AntiLoopRetryEffort
+		if format == "anthropic" {
+			delete(data, "reasoning_effort")
+			delete(data, "reasoning")
+			if cfg.AntiLoopRetryEffort != "" {
+				data["output_config"] = map[string]interface{}{"effort": sanitizeReasoningEffort(cfg.AntiLoopRetryEffort)}
+			}
+		} else {
+			data["thinking"] = map[string]interface{}{"type": "enabled"}
+			if cfg.AntiLoopRetryEffort != "" {
+				eff := sanitizeReasoningEffort(cfg.AntiLoopRetryEffort)
+				data["reasoning_effort"] = eff
+				data["reasoning"] = map[string]interface{}{"effort": eff}
+			}
+		}
 	}
 }
 
@@ -800,14 +813,7 @@ func (s *ProxyServer) buildSimpleRetryRequest(transformedBody []byte, format str
 	delete(data, "max_tokens")
 
 	// Apply retry thinking config (disabled by default)
-	if cfg.AntiLoopRetryThinking == "enabled" {
-		data["thinking"] = map[string]interface{}{"type": "enabled"}
-		data["reasoning_effort"] = cfg.AntiLoopRetryEffort
-	} else {
-		data["thinking"] = map[string]interface{}{"type": "disabled"}
-		delete(data, "reasoning_effort")
-		delete(data, "output_config")
-	}
+	s.applyRetryThinking(data, format, nil)
 
 	// Inject Phase 1 context
 	s.injectRetryContext(data, format, phase1Content, reasoningContent, nil, false)

@@ -553,7 +553,7 @@ config.json
 | `anthropic_upstream` | Anthropic-style upstream address |
 | `language` | GUI language, supports zh / en |
 | `thinking_mode` | Unset, force thinking off, or force thinking on |
-| `reasoning_effort` | Reasoning intensity, e.g. high / max |
+| `reasoning_effort` | Reasoning intensity: `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` |
 | `system_prompt_placement` | System Prompt concatenation position, first / last / none |
 | `extra_prompt` | Extra high-priority instruction |
 | `extra_prompt_placement` | Extra Prompt injection position, first / last / none |
@@ -564,7 +564,7 @@ config.json
 | `anti_loop_enabled` | Whether to enable Anti-Loop |
 | `antiloop_retry_model` | Anti-Loop retry model |
 | `antiloop_retry_thinking` | Whether to enable thinking on retry |
-| `antiloop_retry_effort` | Reasoning intensity on retry |
+| `antiloop_retry_effort` | Reasoning intensity on retry: `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` |
 | `antiloop_check_tokens` | Active loop-detection threshold, 0 means only rely on truncation fallback |
 | `anti_hallucination_enabled` | Whether to enable experimental intent confirmation |
 | `anti_hallucination_prompt` | Intent-confirmation prompt template |

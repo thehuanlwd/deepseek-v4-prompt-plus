@@ -62,9 +62,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, l *Logger) {
 func (h *wsHub) broadcastLoop() {
 	ch := h.logger.Subscribe()
 	for entry := range ch {
+		summary := entry.ToSummary()
 		h.mu.RLock()
 		for conn := range h.clients {
-			conn.WriteJSON(entry)
+			conn.WriteJSON(summary)
 		}
 		h.mu.RUnlock()
 	}

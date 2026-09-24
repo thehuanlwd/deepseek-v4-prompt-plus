@@ -428,32 +428,67 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sanitizeReasoningEffort 归一化推理强度档位。
+// Vercel / OpenRouter / OpenAI 兼容网关仅接受 "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"。
+// 若配置或客户端携带 "ultra"，自动安全映射至最高合法枚举 "max"，避免触发 400 invalid_request_error。
+func sanitizeReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "ultra":
+		return "max"
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return effort
+	}
+}
+
 func (s *ProxyServer) injectThinkingParams(data map[string]interface{}, format string) {
 	cfg := s.config.Get()
 	mode := cfg.ThinkingMode
 	if mode == "" {
+		// 客户端未被服务端强制覆盖时，若客户端自身携带了 "ultra" 等非法枚举，也进行安全归一化
+		if eff, ok := data["reasoning_effort"].(string); ok {
+			data["reasoning_effort"] = sanitizeReasoningEffort(eff)
+		}
+		if reasoning, ok := data["reasoning"].(map[string]interface{}); ok {
+			if eff, ok := reasoning["effort"].(string); ok {
+				reasoning["effort"] = sanitizeReasoningEffort(eff)
+			}
+		}
+		if outputCfg, ok := data["output_config"].(map[string]interface{}); ok {
+			if eff, ok := outputCfg["effort"].(string); ok {
+				outputCfg["effort"] = sanitizeReasoningEffort(eff)
+			}
+		}
 		return
 	}
 
 	if format == "openai" {
 		if mode == "disabled" {
 			data["thinking"] = map[string]interface{}{"type": "disabled"}
+			data["reasoning_effort"] = "none"
+			data["reasoning"] = map[string]interface{}{"effort": "none"}
 		} else if mode == "enabled" {
 			data["thinking"] = map[string]interface{}{"type": "enabled"}
 			if cfg.ReasoningEffort != "" {
-				data["reasoning_effort"] = cfg.ReasoningEffort
+				eff := sanitizeReasoningEffort(cfg.ReasoningEffort)
+				data["reasoning_effort"] = eff
+				data["reasoning"] = map[string]interface{}{"effort": eff}
 			}
 		}
 	} else if format == "anthropic" {
 		if mode == "disabled" {
-			// 强制关闭思考：清理可能残留的 thinking / output_config / reasoning_effort，
+			// 强制关闭思考：清理可能残留的 thinking / output_config / reasoning_effort / reasoning，
 			// 否则原始请求自带的思考字段会导致思考仍被启用（与 OpenAI 行为一致）。
 			data["thinking"] = map[string]interface{}{"type": "disabled"}
 			delete(data, "output_config")
 			delete(data, "reasoning_effort")
+			delete(data, "reasoning")
 		} else if mode == "enabled" {
+			delete(data, "reasoning_effort")
+			delete(data, "reasoning")
 			if cfg.ReasoningEffort != "" {
-				data["output_config"] = map[string]interface{}{"effort": cfg.ReasoningEffort}
+				data["output_config"] = map[string]interface{}{"effort": sanitizeReasoningEffort(cfg.ReasoningEffort)}
 			}
 		}
 	}
@@ -752,7 +787,7 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 			}, "completed")
 		}
 		if cfg.VerboseLogging {
-			s.logger.UpdateLastResponse(ctx.LogID, capture.String())
+			s.logger.UpdateLastResponse(ctx.LogID, truncateBody(capture.String()))
 		}
 
 		// 5. 新建“思维修正”第二阶段日志
@@ -912,7 +947,7 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 		}, "completed")
 	}
 	if cfg.VerboseLogging {
-		s.logger.UpdateLastResponse(ctx.LogID, capture.String())
+		s.logger.UpdateLastResponse(ctx.LogID, truncateBody(capture.String()))
 	}
 
 	// 常规流式走完：回填整轮完成耗时（latency_ms 仍为首字节延迟）
@@ -1392,7 +1427,7 @@ func (s *ProxyServer) executeRetryPhase2(ctx *ProxyContext, state *antiLoopState
 			}, "completed")
 		}
 		if cfg.VerboseLogging {
-			s.logger.UpdateLastResponse(ctx.LogID, state.capture.String())
+			s.logger.UpdateLastResponse(ctx.LogID, truncateBody(state.capture.String()))
 		}
 
 		secondLogID := s.logger.Add(LogEntry{
@@ -1707,7 +1742,7 @@ func (s *ProxyServer) finalizeStream(ctx *ProxyContext, state *antiLoopState) {
 		}, "completed")
 	}
 	if cfg.VerboseLogging {
-		s.logger.UpdateLastResponse(ctx.LogID, state.capture.String())
+		s.logger.UpdateLastResponse(ctx.LogID, truncateBody(state.capture.String()))
 	}
 
 	var pm TokenUsage
@@ -1947,7 +1982,9 @@ func isHopByHop(key string) bool {
 
 func truncateBody(s string) string {
 	if len(s) > truncateBodyMaxLen {
-		return s[:truncateBodyMaxLen] + "\n\n... [truncated]"
+		half := truncateBodyMaxLen / 2
+		omitted := len(s) - truncateBodyMaxLen
+		return s[:half] + fmt.Sprintf("\n\n... [中间已省略 %d 字节] ...\n\n", omitted) + s[len(s)-half:]
 	}
 	return s
 }
@@ -1995,6 +2032,18 @@ func parseUsageFromMap(data map[string]interface{}) *TokenUsage {
 		u.CacheMiss = toInt64(v)
 	}
 
+	// 兼容 OpenAI 官方标准结构: prompt_tokens_details.cached_tokens
+	if details, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
+		if v, ok := details["cached_tokens"]; ok {
+			u.CacheHit = toInt64(v)
+		}
+	}
+	// 兼容部分代理网关的顶层 cached_tokens
+	if v, ok := usage["cached_tokens"]; ok && u.CacheHit == 0 {
+		u.CacheHit = toInt64(v)
+	}
+
+	// 兼容 Anthropic 格式
 	if v, ok := usage["input_tokens"]; ok {
 		u.Prompt = toInt64(v)
 		u.CacheMiss = u.Prompt
@@ -2008,6 +2057,15 @@ func parseUsageFromMap(data map[string]interface{}) *TokenUsage {
 	}
 	if v, ok := usage["cache_creation_input_tokens"]; ok {
 		u.CacheMiss += toInt64(v)
+	}
+
+	// 统一维护 CacheMiss：如果已知 Prompt 且有了 CacheHit，但 CacheMiss 未给出
+	if u.CacheMiss == 0 && u.Prompt > 0 {
+		if u.Prompt >= u.CacheHit {
+			u.CacheMiss = u.Prompt - u.CacheHit
+		} else {
+			u.CacheMiss = u.Prompt
+		}
 	}
 
 	if u.Total == 0 && (u.Prompt > 0 || u.Completion > 0) {

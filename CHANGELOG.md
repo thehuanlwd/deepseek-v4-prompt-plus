@@ -4,6 +4,34 @@ All notable changes to DSPlus are documented here. This project follows the [Kee
 
 ---
 
+## [0.2.2] - 2026-09-24
+
+### Added
+- **Unified 7-tier Reasoning Effort Standard** — Extended thinking intensity options across UI, API, and configs to `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`, unifying multi-vendor / multi-gateway reasoning configurations.
+- **Thinking Levels Comparison Test Suite** — Added `test/test_thinking_levels.go` to test all 8 thinking modes/levels against live upstreams.
+
+### Changed
+- **Reasoning Effort Sanitization & Safe Mapping** — Added `sanitizeReasoningEffort` to map non-standard `ultra` tier to `max` at proxy boundary, preventing 400 Bad Request errors (`invalid_request_error: param reasoning.effort`) when routing through Vercel AI SDK, OpenRouter, and strict API Gateways.
+
+### Fixed
+- **Gateway Thinking Disable Parity** — Fixed issue where forcing thinking off failed on OpenRouter / Cline Gateway by injecting `reasoning_effort: "none"` and `reasoning: {effort: "none"}` alongside DeepSeek's `thinking: {type: "disabled"}`.
+- **Anthropic Format-Aware Retry Thinking** — Fixed Anti-Loop retry requests to properly format thinking parameters (`output_config.effort` vs `reasoning_effort`) based on protocol format.
+
+## [0.2.2] 中文 - 2026-09-24
+
+### Added（新增）
+- **统一 7 档思考强度标准** — UI 设置页、配置管理与代理层全面扩展思考强度为 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra` 7 档，实现跨厂商（OpenAI / Anthropic / DeepSeek / AI Gateway）统一标尺。
+- **全档位自动化测试套件** — 新增 `test/test_thinking_levels.go`，支持对所有思考档位进行真实调用验证与 Token 开销对比。
+
+### Changed（变更）
+- **推理强度安全归一化映射** — 引入 `sanitizeReasoningEffort` 保护层，将 `ultra` 等拓展档位安全映射为网关白名单中的 `max`，彻底规避 Vercel AI SDK / OpenRouter 等网关的 400 `invalid_request_error` 校验报错。
+
+### Fixed（修复）
+- **网关强制关闭思考生效** — 修复了通过 Cline / OpenRouter 网关代理时「强制关闭思考」失效的问题，同时注入 `reasoning_effort: "none"` 与 `reasoning: {effort: "none"}` 确保思维链 100% 关闭。
+- **Anthropic 格式感知重试适配** — 修复 Anti-Loop 截断重试链路中的协议格式感知，针对 `/v1/messages` 请求规范注入 `output_config.effort` 并清理冗余字段。
+
+---
+
 ## [0.2.1] - 2026-07-12
 
 > 🎉 **DSPlus v0.2.1 — 重要修复版。** 修复了一个导致系统提示词失效的严重 bug：当「系统提示词不修改 placement」搭配「额外提示词注入」时，系统提示词会被静默丢弃，使原始请求与重组后请求对应不上。同时新增多供应商支持、API Key 加密存储与请求审计自检脚本。

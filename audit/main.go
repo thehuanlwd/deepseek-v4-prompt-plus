@@ -198,8 +198,8 @@ func checkThinking(cfg cfgSnapshot, rec *auditRecord) result {
 		}
 		return result{"思考模式/强度", pass, detail}
 	case "disabled":
-		pass := rec.ActualThinkingType == "disabled" && rec.ActualReasoningEffort == ""
-		detail := fmt.Sprintf("配置 thinking=disabled：期望 thinking.type=disabled=%v 且 reasoning_effort 被清除=%v；实际 type=%q effort=%q",
+		pass := rec.ActualThinkingType == "disabled" && (rec.ActualReasoningEffort == "" || rec.ActualReasoningEffort == "none")
+		detail := fmt.Sprintf("配置 thinking=disabled：期望 thinking.type=disabled=%v 且 reasoning_effort 清除或为 none=%v；实际 type=%q effort=%q",
 			true, true, rec.ActualThinkingType, rec.ActualReasoningEffort)
 		return result{"思考模式/强度", pass, detail}
 	default:

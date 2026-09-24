@@ -449,8 +449,13 @@ func main() {
             <div class="config-row" id="effortGroup" style="display:none">
               <label>思考强度</label>
               <select id="cfgReasoningEffort">
+                <option value="minimal">minimal（极简推理）</option>
+                <option value="low">low（低强度推理）</option>
+                <option value="medium">medium（中等推理）</option>
                 <option value="high">high（标准推理）</option>
+                <option value="xhigh">xhigh（超强推理）</option>
                 <option value="max">max（最强推理）</option>
+                <option value="ultra">ultra（极限推理）</option>
               </select>
               <div style="font-size: 0.7rem; color: #747266; margin-top: 0.3rem;">仅在"强制启动思考"时生效</div>
             </div>
@@ -578,8 +583,13 @@ func main() {
               <div class="config-row" id="antiloopEffortGroup" style="display:none">
                 <label style="font-size: 0.7rem; color: #747266;">重试思考强度</label>
                 <select id="cfgAntiloopRetryEffort">
+                  <option value="minimal">minimal (极简推理)</option>
+                  <option value="low">low (低强度推理)</option>
+                  <option value="medium">medium (中等推理)</option>
                   <option value="high">high (标准推理)</option>
+                  <option value="xhigh">xhigh (超强推理)</option>
                   <option value="max">max (最强推理)</option>
+                  <option value="ultra">ultra (极限推理)</option>
                 </select>
               </div>
               <div class="config-row">

@@ -238,8 +238,25 @@ async function loadStatus() {
     $('statPort').textContent = s.port;
     $('statTotal').textContent = s.total;
     $('statTotalDashboard').textContent = s.total;
-    $('statToday').textContent = formatIntCompact(s.total_tokens);
     $('emptyPort').textContent = formatRate(s.tokens_rate);
+
+    const rateDescEl = document.querySelector('#emptyPort') ? document.querySelector('#emptyPort').parentElement.querySelector('.figure-desc') : null;
+    if (rateDescEl) {
+      rateDescEl.title = '流式请求解码阶段加权平均速率 (总有效输出Tokens / 总有效生成秒数)';
+    }
+
+    if (s.total_tokens > 0) {
+      $('statToday').textContent = formatIntCompact(s.total_tokens);
+      const totalPrompt = (s.cache_hit_tokens || 0) + (s.cache_miss_tokens || 0);
+      const hitRate = totalPrompt > 0 ? (((s.cache_hit_tokens || 0) / totalPrompt) * 100).toFixed(1) + '%' : '0%';
+      const descEl = document.querySelector('#statToday') ? document.querySelector('#statToday').parentElement.querySelector('.figure-desc') : null;
+      if (descEl) {
+        descEl.textContent = `入:${formatIntCompact(s.prompt_tokens || 0)} (缓存:${hitRate}) | 出:${formatIntCompact(s.completion_tokens || 0)}`;
+        descEl.title = `总Tokens: ${s.total_tokens.toLocaleString()}\n输入: ${(s.prompt_tokens || 0).toLocaleString()} (命中: ${(s.cache_hit_tokens || 0).toLocaleString()}, 未命中: ${(s.cache_miss_tokens || 0).toLocaleString()}, 缓存率: ${hitRate})\n输出: ${(s.completion_tokens || 0).toLocaleString()}`;
+      }
+    } else {
+      $('statToday').textContent = '0';
+    }
   } catch(e) {}
 }
 
@@ -259,6 +276,11 @@ async function loadLogs() {
 // ── 数值滚动的 Ease-Out 缓动动画 ──
 function animateValue(element, start, end, duration = 150) {
   if (start === end) return;
+  // 若当前元素有进行中的缓动，先取消以避免多动画竞态覆盖
+  if (element._animRafId) {
+    cancelAnimationFrame(element._animRafId);
+    element._animRafId = null;
+  }
   const startTime = performance.now();
   
   function update(currentTime) {
@@ -268,10 +290,12 @@ function animateValue(element, start, end, duration = 150) {
     element.textContent = current;
     
     if (progress < 1) {
-      requestAnimationFrame(update);
+      element._animRafId = requestAnimationFrame(update);
+    } else {
+      element._animRafId = null;
     }
   }
-  requestAnimationFrame(update);
+  element._animRafId = requestAnimationFrame(update);
 }
 
 // ── 格式化 Badges 结构 ──
@@ -476,19 +500,82 @@ function updateRowCells(tr, e, time, semBadge, fmtBadge, streamBadge, tfBadge, s
   }
 }
 
+function matchesLogQuery(e, query) {
+  if (!query) return true;
+  const semLabel = getSemanticLabel(e.semantic_type) || '对话';
+  return (e.path||'').toLowerCase().includes(query) ||
+         (e.format||'').toLowerCase().includes(query) ||
+         (e.semantic_type||'').toLowerCase().includes(query) ||
+         semLabel.toLowerCase().includes(query) ||
+         String(e.status_code).includes(query);
+}
+
+function updateSingleRow(tr, e) {
+  const time = new Date(e.time).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const fmtBadge = getFormatBadgeHtml(e);
+  const streamBadge = e.stream ? '<span class="badge badge-yes">YES</span>' : '<span class="badge badge-no">NO</span>';
+  const tfBadge = e.transformed ? '<span class="badge badge-yes">是</span>' : '<span class="badge badge-no">否</span>';
+  const semBadge = getSemanticBadgeHtml(e.semantic_type);
+  const specialBadge = getSpecialBadgeHtml(e);
+
+  const scClass = e.status_code === 0 ? 'status-pending' : (e.status_code >= 400 ? 'status-400' : e.status_code >= 200 && e.status_code < 300 ? 'status-200' : '');
+  const scText = e.status_code === 0 ? 'PENDING' : e.status_code;
+  const isPending = e.status_code === 0 || e.latency_ms === 0;
+  const latencyStr = isPending ? '--' : (e.latency_ms >= 1000 ? (e.latency_ms/1000).toFixed(1)+'s' : e.latency_ms+'ms');
+  const totalMsStr = (!e.total_ms || e.total_ms === 0) ? '--' : (e.total_ms >= 1000 ? (e.total_ms/1000).toFixed(1)+'s' : e.total_ms+'ms');
+
+  const cacheHtml = getCacheHtml(e);
+  const latencyGridHtml = getLatencyGridHtml(e);
+
+  updateRowCells(tr, e, time, semBadge, fmtBadge, streamBadge, tfBadge, scClass, scText, latencyGridHtml, latencyStr, totalMsStr, cacheHtml, specialBadge);
+}
+
+function buildRowElement(e) {
+  const time = new Date(e.time).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const fmtBadge = getFormatBadgeHtml(e);
+  const streamBadge = e.stream ? '<span class="badge badge-yes">YES</span>' : '<span class="badge badge-no">NO</span>';
+  const tfBadge = e.transformed ? '<span class="badge badge-yes">是</span>' : '<span class="badge badge-no">否</span>';
+  const semBadge = getSemanticBadgeHtml(e.semantic_type);
+  const specialBadge = getSpecialBadgeHtml(e);
+
+  const scClass = e.status_code === 0 ? 'status-pending' : (e.status_code >= 400 ? 'status-400' : e.status_code >= 200 && e.status_code < 300 ? 'status-200' : '');
+  const scText = e.status_code === 0 ? 'PENDING' : e.status_code;
+  const isPending = e.status_code === 0 || e.latency_ms === 0;
+  const latencyStr = isPending ? '--' : (e.latency_ms >= 1000 ? (e.latency_ms/1000).toFixed(1)+'s' : e.latency_ms+'ms');
+  const totalMsStr = (!e.total_ms || e.total_ms === 0) ? '--' : (e.total_ms >= 1000 ? (e.total_ms/1000).toFixed(1)+'s' : e.total_ms+'ms');
+
+  const cacheHtml = getCacheHtml(e);
+  const latencyGridHtml = getLatencyGridHtml(e);
+
+  const tr = document.createElement('tr');
+  tr.dataset.id = e.id;
+  tr.addEventListener('click', () => showDetail(e.id));
+  
+  tr.innerHTML = `
+    <td>${time}</td>
+    <td>${semBadge}</td>
+    <td>${fmtBadge}</td>
+    <td>${streamBadge}</td>
+    <td>${tfBadge}</td>
+    <td class="${scClass}">${scText}</td>
+    <td>${latencyGridHtml}<span class="latency">${latencyStr}</span></td>
+    <td class="total-td" style="color:var(--yorha-fg-dim)">${totalMsStr}</td>
+    <td class="tokens-td"></td>
+    ${cacheHtml}
+    <td class="endpoint-cell" style="color:var(--yorha-fg-dim)">${getPathText(e)}</td>
+    <td>${specialBadge}</td>
+  `;
+  updateTokenCell(tr.querySelector('.tokens-td'), e);
+  if (e.id === currentDetailId) {
+    tr.classList.add('selected-row');
+  }
+  return tr;
+}
+
 // ── 渲染日志列表 ──
 function renderLogs() {
   const query = $('searchInput').value.toLowerCase();
-  const filtered = logs.filter(e => {
-    if (!query) return true;
-    const semLabel = getSemanticLabel(e.semantic_type) || '对话';
-    return (e.path||'').toLowerCase().includes(query) ||
-           (e.format||'').toLowerCase().includes(query) ||
-           (e.semantic_type||'').toLowerCase().includes(query) ||
-           semLabel.toLowerCase().includes(query) ||
-           String(e.status_code).includes(query);
-  });
-
+  const filtered = logs.filter(e => matchesLogQuery(e, query));
   const body = $('logBody');
 
   if (filtered.length === 0) {
@@ -501,7 +588,6 @@ function renderLogs() {
       $('emptyState').style.display = 'none';
       body.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--yorha-fg-dim);padding:20px">' + (t('common.no_match') || '无匹配记录') + '</td></tr>';
     }
-    if (typeof applyI18n === 'function') applyI18n();
     return;
   }
 
@@ -515,45 +601,11 @@ function renderLogs() {
 
   const fragment = document.createDocumentFragment();
   filtered.forEach(e => {
-    const time = new Date(e.time).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    const fmtBadge = getFormatBadgeHtml(e);
-    const streamBadge = e.stream ? '<span class="badge badge-yes">YES</span>' : '<span class="badge badge-no">NO</span>';
-    const tfBadge = e.transformed ? '<span class="badge badge-yes">是</span>' : '<span class="badge badge-no">否</span>';
-    const semBadge = getSemanticBadgeHtml(e.semantic_type);
-    const specialBadge = getSpecialBadgeHtml(e);
-
-    const scClass = e.status_code === 0 ? 'status-pending' : (e.status_code >= 400 ? 'status-400' : e.status_code >= 200 && e.status_code < 300 ? 'status-200' : '');
-    const scText = e.status_code === 0 ? 'PENDING' : e.status_code;
-    const isPending = e.status_code === 0 || e.latency_ms === 0;
-    const latencyStr = isPending ? '--' : (e.latency_ms >= 1000 ? (e.latency_ms/1000).toFixed(1)+'s' : e.latency_ms+'ms');
-    const totalMsStr = (!e.total_ms || e.total_ms === 0) ? '--' : (e.total_ms >= 1000 ? (e.total_ms/1000).toFixed(1)+'s' : e.total_ms+'ms');
-
-    const cacheHtml = getCacheHtml(e);
-    const latencyGridHtml = getLatencyGridHtml(e);
-
     let tr = existingRows[e.id];
     if (tr) {
-      updateRowCells(tr, e, time, semBadge, fmtBadge, streamBadge, tfBadge, scClass, scText, latencyGridHtml, latencyStr, totalMsStr, cacheHtml, specialBadge);
+      updateSingleRow(tr, e);
     } else {
-      tr = document.createElement('tr');
-      tr.dataset.id = e.id;
-      tr.addEventListener('click', () => showDetail(e.id));
-      
-      tr.innerHTML = `
-        <td>${time}</td>
-        <td>${semBadge}</td>
-        <td>${fmtBadge}</td>
-        <td>${streamBadge}</td>
-        <td>${tfBadge}</td>
-        <td class="${scClass}">${scText}</td>
-        <td>${latencyGridHtml}<span class="latency">${latencyStr}</span></td>
-        <td class="total-td" style="color:var(--yorha-fg-dim)">${totalMsStr}</td>
-        <td class="tokens-td"></td>
-        ${cacheHtml}
-        <td class="endpoint-cell" style="color:var(--yorha-fg-dim)">${getPathText(e)}</td>
-        <td>${specialBadge}</td>
-      `;
-      updateTokenCell(tr.querySelector('.tokens-td'), e);
+      tr = buildRowElement(e);
     }
 
     if (e.id === currentDetailId) {
@@ -567,8 +619,82 @@ function renderLogs() {
 
   body.innerHTML = '';
   body.appendChild(fragment);
+}
 
-  if (typeof applyI18n === 'function') applyI18n();
+const MAX_PREVIEW_BYTES = 200 * 1024; // 200KB 安全预览阈值
+
+function updateDrawerHeaderInfo(e) {
+  if (!$('yorhaDrawer') || !$('yorhaDrawer').classList.contains('open')) return;
+  const time = new Date(e.time).toLocaleString('zh-CN');
+  const rtLabel = e.request_type === 'antiloop_analyzer' ? ' (防无限思考分析器)' :
+                  e.request_type === 'antiloop_retry' ? ' (防无限思考重试)' : '';
+  const isPending = e.status_code === 0 || e.latency_ms === 0;
+  const latencyStr = isPending ? '等待首响...' : (e.latency_ms >= 1000 ? (e.latency_ms/1000).toFixed(1)+'s' : e.latency_ms+'ms');
+  const totalStr = (!e.total_ms || e.total_ms === 0) ? '--' : (e.total_ms >= 1000 ? (e.total_ms/1000).toFixed(1)+'s' : e.total_ms+'ms');
+
+  let info = `时间: ${time}
+格式: ${e.format}${rtLabel}
+流式: ${e.stream ? '是' : '否'}
+方法: ${e.method} ${e.path}
+状态码: ${e.status_code === 0 ? 'PENDING' : e.status_code}
+延迟: ${latencyStr}
+总耗时: ${totalStr}
+是否重组: ${e.transformed ? '是' : '否'}
+包含System Prompt: ${e.has_system_prompt ? '是' : '否'}`;
+  $('drawer-info').textContent = info;
+}
+
+function downloadRawText(text, filename) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function renderSafeText(section, rawText, defaultFileName = 'data.txt') {
+  const contentEl = section.querySelector('.detail-content');
+  if (!contentEl) return;
+  if (!rawText) {
+    contentEl.textContent = '--';
+    return;
+  }
+
+  // 清除旧下载按钮
+  const oldBtn = section.querySelector('.btn-download-full');
+  if (oldBtn) oldBtn.remove();
+
+  if (rawText.length > MAX_PREVIEW_BYTES) {
+    const half = Math.floor(MAX_PREVIEW_BYTES / 2); // 100KB 前后对半
+    const head = rawText.slice(0, half);
+    const tail = rawText.slice(rawText.length - half);
+    const omittedKb = Math.round((rawText.length - MAX_PREVIEW_BYTES) / 1024);
+    const totalMb = (rawText.length / 1024 / 1024).toFixed(2);
+    contentEl.textContent = head + `\n\n... [中间已安全省略约 ${omittedKb} KB 内容，完整文件共 ${totalMb} MB，可点击右上方按钮下载完整内容] ...\n\n` + tail;
+
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'button button-accent btn-download-full';
+    dlBtn.style.marginLeft = '8px';
+    dlBtn.style.padding = '2px 8px';
+    dlBtn.style.fontSize = '11px';
+    dlBtn.textContent = '下载完整内容 (' + totalMb + ' MB)';
+    dlBtn.onclick = (evt) => {
+      evt.stopPropagation();
+      downloadRawText(rawText, defaultFileName);
+    };
+    const header = section.querySelector('.detail-header') || section.firstElementChild;
+    if (header) header.appendChild(dlBtn);
+  } else {
+    if (section.id === 'sec-rawRequest' || section.id === 'sec-mutatedRequest') {
+      contentEl.textContent = tryPretty(rawText);
+    } else {
+      contentEl.textContent = prettyBody(rawText);
+    }
+  }
 }
 
 // ── 右侧滑动抽屉详情展示 ──
@@ -592,53 +718,24 @@ async function showDetail(id) {
     $('drawerTitle').textContent = 'DATA TRACE #' + id;
 
     // 1. 基本信息
-    const time = new Date(e.time).toLocaleString('zh-CN');
-    const rtLabel = e.request_type === 'antiloop_analyzer' ? ' (防无限思考分析器)' :
-                    e.request_type === 'antiloop_retry' ? ' (防无限思考重试)' : '';
-    let info = `时间: ${time}
- 格式: ${e.format}${rtLabel}
- 流式: ${e.stream ? '是' : '否'}
- 方法: ${e.method} ${e.path}
- 状态码: ${e.status_code === 0 ? 'PENDING' : e.status_code}
- 延迟: ${e.status_code === 0 || e.latency_ms === 0 ? '等待首响...' : e.latency_ms + 'ms'}
- 是否重组: ${e.transformed ? '是' : '否'}
- 包含System Prompt: ${e.has_system_prompt ? '是' : '否'}`;
-    $('drawer-info').textContent = info;
+    updateDrawerHeaderInfo(e);
 
     // 2. 响应头
-    if (e.response_headers && Object.keys(e.response_headers).length > 0) {
-      $('sec-headers').style.display = '';
-    } else {
-      $('sec-headers').style.display = 'none';
-    }
+    $('sec-headers').style.display = (e.response_headers && Object.keys(e.response_headers).length > 0) ? '' : 'none';
 
     // 3. 原始请求体
-    if (e.original_body) {
-      $('sec-rawRequest').style.display = '';
-    } else {
-      $('sec-rawRequest').style.display = 'none';
-    }
+    $('sec-rawRequest').style.display = e.original_body ? '' : 'none';
 
     // 4. 重组后请求体
-    if (e.transformed_body) {
-      $('sec-mutatedRequest').style.display = '';
-    } else {
-      $('sec-mutatedRequest').style.display = 'none';
-    }
+    $('sec-mutatedRequest').style.display = e.transformed_body ? '' : 'none';
 
     // 5. 上游原始响应（仅 anti-loop 模式下有值）
-    if (e.upstream_response_body) {
-      $('sec-upstreamResponse').style.display = '';
-    } else {
-      $('sec-upstreamResponse').style.display = 'none';
-    }
+    $('sec-upstreamResponse').style.display = e.upstream_response_body ? '' : 'none';
 
-    // 6. API响应体与最终回复
+    // 6. API响应体与最终回复（延迟到真正点击展开时解析，绝不阻塞主线程）
     if (e.response_body) {
       $('sec-apiResponse').style.display = '';
-      const finalReply = parseFinalReply(e.response_body, e.format);
-      const hasFinalContent = finalReply && (finalReply.reasoning || finalReply.content || (finalReply.toolCalls && finalReply.toolCalls.length > 0));
-      $('sec-finalReply').style.display = hasFinalContent ? '' : 'none';
+      $('sec-finalReply').style.display = '';
     } else {
       $('sec-apiResponse').style.display = 'none';
       $('sec-finalReply').style.display = 'none';
@@ -655,6 +752,8 @@ async function showDetail(id) {
       if (content && sec.id !== 'sec-info') {
         content.textContent = '';
       }
+      const dlBtn = sec.querySelector('.btn-download-full');
+      if (dlBtn) dlBtn.remove();
     });
 
     $('yorhaDrawer').classList.add('open');
@@ -678,6 +777,8 @@ function closeDrawer() {
     if (content && sec.id !== 'sec-info') {
       content.textContent = '';
     }
+    const dlBtn = sec.querySelector('.btn-download-full');
+    if (dlBtn) dlBtn.remove();
   });
   window._currentDrawerDetail = null;
 }
@@ -693,19 +794,19 @@ function toggleDetailSection(label) {
     if (contentEl) {
       const e = window._currentDrawerDetail;
       if (e) {
-            if (section.id === 'sec-headers') {
-              contentEl.textContent = Object.entries(e.response_headers || {}).map(([k,v]) => `${k}: ${v}`).join('\n');
-            } else if (section.id === 'sec-rawRequest') {
-              contentEl.textContent = tryPretty(e.original_body);
-            } else if (section.id === 'sec-mutatedRequest') {
-              contentEl.textContent = tryPretty(e.transformed_body);
-            } else if (section.id === 'sec-upstreamResponse') {
-              contentEl.textContent = prettyBody(e.upstream_response_body);
-            } else if (section.id === 'sec-apiResponse') {
-              contentEl.textContent = prettyBody(e.response_body);
-            } else if (section.id === 'sec-finalReply') {
-              contentEl.innerHTML = renderFinalReply(e.response_body, e.format);
-            }
+        if (section.id === 'sec-headers') {
+          contentEl.textContent = Object.entries(e.response_headers || {}).map(([k,v]) => `${k}: ${v}`).join('\n');
+        } else if (section.id === 'sec-rawRequest') {
+          renderSafeText(section, e.original_body, `raw_request_${e.id}.json`);
+        } else if (section.id === 'sec-mutatedRequest') {
+          renderSafeText(section, e.transformed_body, `mutated_request_${e.id}.json`);
+        } else if (section.id === 'sec-upstreamResponse') {
+          renderSafeText(section, e.upstream_response_body, `upstream_response_${e.id}.txt`);
+        } else if (section.id === 'sec-apiResponse') {
+          renderSafeText(section, e.response_body, `api_response_${e.id}.txt`);
+        } else if (section.id === 'sec-finalReply') {
+          contentEl.innerHTML = renderFinalReply(e.response_body, e.format);
+        }
       }
     }
   } else {
@@ -715,6 +816,8 @@ function toggleDetailSection(label) {
       if (contentEl) {
         contentEl.textContent = '';
       }
+      const dlBtn = section.querySelector('.btn-download-full');
+      if (dlBtn) dlBtn.remove();
     }
   }
 }
@@ -890,6 +993,15 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+let statusUpdateTimer = null;
+function scheduleStatusUpdate() {
+  if (statusUpdateTimer) return;
+  statusUpdateTimer = setTimeout(() => {
+    statusUpdateTimer = null;
+    loadStatus();
+  }, 1000); // 1秒防抖更新系统指标，避免并发高频打爆网络
+}
+
 // ── WebSocket 实时同步 ──
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -898,19 +1010,41 @@ function connectWS() {
   ws.onmessage = (e) => {
     try {
       const entry = JSON.parse(e.data);
+      const query = $('searchInput').value.toLowerCase();
+      const body = $('logBody');
       const idx = logs.findIndex(l => l.id === entry.id);
-      if (idx >= 0) {
-        logs[idx] = entry;
-      } else {
-        logs.unshift(entry);
-      }
-      if (logs.length > 200) logs.length = 200;
-      renderLogs();
-      loadStatus();
 
-      if (entry.id === currentDetailId) {
-        showDetail(entry.id);
+      if (idx >= 0) {
+        logs[idx] = entry; // 内存同步
+        // 单行直连更新（Fast Path）：无损直连，完全不触发全表拔插与重绘
+        const tr = body.querySelector(`tr[data-id="${entry.id}"]`);
+        if (tr) {
+          updateSingleRow(tr, entry);
+        } else if (matchesLogQuery(entry, query)) {
+          renderLogs();
+        }
+      } else {
+        // 全新请求插入头部
+        logs.unshift(entry);
+        if (logs.length > 200) logs.length = 200;
+
+        if (matchesLogQuery(entry, query)) {
+          $('logTable').style.display = '';
+          $('emptyState').style.display = 'none';
+          const newTr = buildRowElement(entry);
+          body.insertBefore(newTr, body.firstChild);
+          while (body.children.length > 200) {
+            body.lastElementChild.remove();
+          }
+        }
       }
+
+      // 如果抽屉正打开着当前记录，仅轻量同步抽屉头部的延迟和状态，不重复发送大网络请求
+      if (entry.id === currentDetailId) {
+        updateDrawerHeaderInfo(entry);
+      }
+
+      scheduleStatusUpdate();
     } catch(ex) {}
   };
 

@@ -127,18 +127,22 @@ func handleAPIStatus(w http.ResponseWriter, r *http.Request, l *Logger, cfg *Saf
 		reasons = append(reasons, "局域网/WSL 访问")
 	}
 
-	// 平均 token 速率 = 首页列表内每个请求单独计算的 (输出tokens(含思考) / (总耗时-首响)) 的算术平均
+	// 平均 token 速率 = 流式请求总量加权解码吞吐率 (总有效输出tokens / 总有效解码耗时秒)
 	tokensRate := l.AvgOutputTokensPerSec()
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"port":             c.Port,
-		"total":            stats["total"],
-		"today":            stats["today"],
-		"total_tokens":     stats["total_tokens"],
-		"tokens_rate":      tokensRate,
-		"max_logs":         l.maxSize,
-		"restart_required": restartRequired,
-		"restart_reasons":  reasons,
+		"port":              c.Port,
+		"total":             stats["total"],
+		"today":             stats["today"],
+		"total_tokens":      stats["total_tokens"],
+		"prompt_tokens":     stats["prompt_tokens"],
+		"completion_tokens": stats["completion_tokens"],
+		"cache_hit_tokens":  stats["cache_hit_tokens"],
+		"cache_miss_tokens": stats["cache_miss_tokens"],
+		"tokens_rate":       tokensRate,
+		"max_logs":          l.maxSize,
+		"restart_required":  restartRequired,
+		"restart_reasons":   reasons,
 	})
 }
 
