@@ -461,7 +461,7 @@ func TestSaveConfigDoesNotCorruptInMemory(t *testing.T) {
 		t.Errorf("SaveConfig 不应修改内存中的明文密钥，得到: %q", cfg.Providers[0].APIKey)
 	}
 	// 落盘内容必须是密文（带 ENC: 前缀）。
-	raw, err := os.ReadFile(configPath)
+	raw, err := os.ReadFile(configPath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,6 +509,350 @@ func TestInjectThinkingParams_Empty(t *testing.T) {
 	ps.injectThinkingParams(data, "openai")
 	if _, exists := data["thinking"]; exists {
 		t.Error("empty mode should not inject thinking param")
+	}
+}
+
+// ── DeepSeek 系列档位收敛 ────────────────────────────────────────────────────
+
+func TestSanitizeReasoningEffortFor_DeepSeek(t *testing.T) {
+	cases := map[string]string{
+		"minimal": "low",
+		"low":     "low",
+		"medium":  "high",
+		"high":    "high",
+		"xhigh":   "high",
+		"max":     "max",
+		"ultra":   "max",
+		"none":    "none", // 表外取值（关闭思考）保持原样
+		"  MAX  ": "max",  // 大小写与空白应被规整
+	}
+	for in, want := range cases {
+		if got := sanitizeReasoningEffortFor(in, true); got != want {
+			t.Errorf("DeepSeek %q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSanitizeReasoningEffortFor_NonDeepSeek(t *testing.T) {
+	// 非 DeepSeek 通道：仅 ultra → max，其余档位原样保留，不做 DeepSeek 收敛。
+	cases := map[string]string{
+		"minimal": "minimal",
+		"low":     "low",
+		"medium":  "medium",
+		"high":    "high",
+		"xhigh":   "xhigh",
+		"max":     "max",
+		"ultra":   "max",
+	}
+	for in, want := range cases {
+		if got := sanitizeReasoningEffortFor(in, false); got != want {
+			t.Errorf("非 DeepSeek %q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIsDeepSeekModel_ByModelID(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{})}
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"deepseek-chat", true},
+		{"deepseek-reasoner", true},
+		{"cline-pass/deepseek-v4.1-flash", true},
+		{"DeepSeek-V4-Pro", true},
+		{"gpt-5", false},
+		{"claude-sonnet-4", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		data := map[string]interface{}{}
+		if c.model != "" {
+			data["model"] = c.model
+		}
+		if got := ps.isDeepSeekModel(data, "openai"); got != c.want {
+			t.Errorf("model %q: got %v, want %v", c.model, got, c.want)
+		}
+	}
+}
+
+func TestIsDeepSeekModel_ByUpstreamHost(t *testing.T) {
+	// 模型名不含 deepseek，但上游指向官方域名时，仍视为 DeepSeek 通道。
+	ds := &ProxyServer{config: NewSafeConfig(Config{
+		ActiveProvider: "DeepSeek",
+		Providers:      []Provider{{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}},
+	})}
+	if !ds.isDeepSeekModel(map[string]interface{}{"model": "v4-flash"}, "openai") {
+		t.Error("上游为 api.deepseek.com 时应判定为 DeepSeek")
+	}
+	// 其他厂商上游且模型名不含 deepseek：不得判定为 DeepSeek。
+	other := &ProxyServer{config: NewSafeConfig(Config{
+		ActiveProvider: "OpenRouter",
+		Providers:      []Provider{{Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1"}},
+	})}
+	if other.isDeepSeekModel(map[string]interface{}{"model": "gpt-5"}, "openai") {
+		t.Error("非 DeepSeek 上游与模型不应判定为 DeepSeek")
+	}
+}
+
+func TestIsDeepSeekModel_AnthropicBaseURL(t *testing.T) {
+	// Anthropic 格式的真实上游由 AnthropicBaseURL 决定，判定必须与格式对齐，
+	// 否则会漏判（实际打到 DeepSeek 却不收敛）或误判（实际打到第三方却收敛）。
+	split := &ProxyServer{config: NewSafeConfig(Config{
+		ActiveProvider: "Split",
+		Providers: []Provider{{
+			Name:             "Split",
+			BaseURL:          "https://openrouter.ai/api/v1",
+			AnthropicBaseURL: "https://api.deepseek.com/anthropic",
+		}},
+	})}
+	if !split.isDeepSeekModel(map[string]interface{}{"model": "v4-flash"}, "anthropic") {
+		t.Error("Anthropic 格式经 AnthropicBaseURL 命中 DeepSeek 时应判定为 DeepSeek")
+	}
+	if split.isDeepSeekModel(map[string]interface{}{"model": "v4-flash"}, "openai") {
+		t.Error("OpenAI 格式走第三方 BaseURL，不应判定为 DeepSeek")
+	}
+
+	// 反向：BaseURL 是 DeepSeek，但 Anthropic 格式走第三方 AnthropicBaseURL。
+	reverse := &ProxyServer{config: NewSafeConfig(Config{
+		ActiveProvider: "Reverse",
+		Providers: []Provider{{
+			Name:             "Reverse",
+			BaseURL:          "https://api.deepseek.com",
+			AnthropicBaseURL: "https://gateway.example.com/anthropic",
+		}},
+	})}
+	if reverse.isDeepSeekModel(map[string]interface{}{"model": "v4-flash"}, "anthropic") {
+		t.Error("Anthropic 格式走第三方 AnthropicBaseURL 时不应判定为 DeepSeek")
+	}
+}
+
+func TestIsDeepSeekModel_ThirdPartyGatewayWithDeepSeekModel(t *testing.T) {
+	// 判据一与厂商无关：第三方网关上的 DeepSeek 系列模型同样收敛，其他模型不受影响。
+	ps := &ProxyServer{config: NewSafeConfig(Config{
+		ActiveProvider: "OpenRouter",
+		Providers:      []Provider{{Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1"}},
+	})}
+	if !ps.isDeepSeekModel(map[string]interface{}{"model": "deepseek/deepseek-v4.1-flash"}, "openai") {
+		t.Error("第三方网关上的 DeepSeek 系列模型仍应判定为 DeepSeek")
+	}
+	if ps.isDeepSeekModel(map[string]interface{}{"model": "openai/gpt-5"}, "openai") {
+		t.Error("第三方网关上的非 DeepSeek 模型不应判定为 DeepSeek")
+	}
+}
+
+func TestIsDeepSeekHost(t *testing.T) {
+	cases := map[string]bool{
+		"api.deepseek.com":     true,
+		"deepseek.com":         true,
+		"api.deepseek.com.":    true, // FQDN 尾点
+		"API.DeepSeek.com":     true,
+		"notdeepseek.com":      false,
+		"deepseek.com.evil.io": false,
+		"":                     false,
+	}
+	for in, want := range cases {
+		if got := isDeepSeekHost(in); got != want {
+			t.Errorf("isDeepSeekHost(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestUpstreamHostname(t *testing.T) {
+	cases := map[string]string{
+		"https://api.deepseek.com":        "api.deepseek.com",
+		"https://api.deepseek.com/v1":     "api.deepseek.com",
+		"https://api.deepseek.com:443/v1": "api.deepseek.com",
+		"api.deepseek.com/v1":             "api.deepseek.com",
+		"":                                "",
+	}
+	for in, want := range cases {
+		if got := upstreamHostname(in); got != want {
+			t.Errorf("upstreamHostname(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInjectThinkingParams_DeepSeekMapping(t *testing.T) {
+	// DeepSeek 模型：medium 实际应发出 high，reasoning.effort 同步。
+	ps := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled", ReasoningEffort: "medium"})}
+	data := map[string]interface{}{"model": "deepseek-chat"}
+	ps.injectThinkingParams(data, "openai")
+	if data["reasoning_effort"] != "high" {
+		t.Errorf("DeepSeek medium 应映射为 high, got %v", data["reasoning_effort"])
+	}
+	if r, _ := data["reasoning"].(map[string]interface{}); r == nil || r["effort"] != "high" {
+		t.Errorf("reasoning.effort 应同步为 high, got %v", data["reasoning"])
+	}
+
+	// 非 DeepSeek 模型：medium 必须保持 medium，不被收敛。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled", ReasoningEffort: "medium"})}
+	data2 := map[string]interface{}{"model": "gpt-5"}
+	ps2.injectThinkingParams(data2, "openai")
+	if data2["reasoning_effort"] != "medium" {
+		t.Errorf("非 DeepSeek medium 应保持 medium, got %v", data2["reasoning_effort"])
+	}
+}
+
+func TestInjectThinkingParams_DeepSeekMinimalToLow(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled", ReasoningEffort: "minimal"})}
+	data := map[string]interface{}{"model": "cline-pass/deepseek-v4.1-flash"}
+	ps.injectThinkingParams(data, "openai")
+	if data["reasoning_effort"] != "low" {
+		t.Errorf("DeepSeek minimal 应映射为 low, got %v", data["reasoning_effort"])
+	}
+}
+
+func TestInjectThinkingParams_AnthropicDeepSeekMapping(t *testing.T) {
+	// Anthropic 格式走 output_config.effort，同样适用 DeepSeek 收敛。
+	ps := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled", ReasoningEffort: "xhigh"})}
+	data := map[string]interface{}{"model": "deepseek-chat"}
+	ps.injectThinkingParams(data, "anthropic")
+	oc, _ := data["output_config"].(map[string]interface{})
+	if oc == nil || oc["effort"] != "high" {
+		t.Errorf("Anthropic DeepSeek xhigh 应映射为 high, got %v", data["output_config"])
+	}
+
+	// 非 DeepSeek 的 Anthropic 请求不受影响。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled", ReasoningEffort: "xhigh"})}
+	data2 := map[string]interface{}{"model": "claude-sonnet-4"}
+	ps2.injectThinkingParams(data2, "anthropic")
+	oc2, _ := data2["output_config"].(map[string]interface{})
+	if oc2 == nil || oc2["effort"] != "xhigh" {
+		t.Errorf("非 DeepSeek Anthropic xhigh 应保持 xhigh, got %v", data2["output_config"])
+	}
+}
+
+func TestInjectThinkingParams_ClientSuppliedDeepSeekMapping(t *testing.T) {
+	// thinking_mode 为空时不覆盖客户端档位，但 DeepSeek 系列仍应做收敛。
+	ps := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: ""})}
+	data := map[string]interface{}{
+		"model":            "deepseek-chat",
+		"reasoning_effort": "xhigh",
+	}
+	ps.injectThinkingParams(data, "openai")
+	if data["reasoning_effort"] != "high" {
+		t.Errorf("客户端 xhigh 在 DeepSeek 通道应收敛为 high, got %v", data["reasoning_effort"])
+	}
+
+	// 非 DeepSeek 通道下客户端 xhigh 原样保留。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: ""})}
+	data2 := map[string]interface{}{
+		"model":            "gpt-5",
+		"reasoning_effort": "xhigh",
+	}
+	ps2.injectThinkingParams(data2, "openai")
+	if data2["reasoning_effort"] != "xhigh" {
+		t.Errorf("非 DeepSeek 通道客户端 xhigh 应保留, got %v", data2["reasoning_effort"])
+	}
+}
+
+func TestInjectThinkingParams_ClientSuppliedFieldVariants(t *testing.T) {
+	// thinking_mode 为空时，reasoning.effort 与 output_config.effort 两种写法同样要收敛。
+	ps := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: ""})}
+	data := map[string]interface{}{
+		"model":     "deepseek-chat",
+		"reasoning": map[string]interface{}{"effort": "minimal"},
+	}
+	ps.injectThinkingParams(data, "openai")
+	if r, _ := data["reasoning"].(map[string]interface{}); r == nil || r["effort"] != "low" {
+		t.Errorf("reasoning.effort 的 minimal 应收敛为 low, got %v", data["reasoning"])
+	}
+
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: ""})}
+	data2 := map[string]interface{}{
+		"model":         "deepseek-chat",
+		"output_config": map[string]interface{}{"effort": "ultra"},
+	}
+	ps2.injectThinkingParams(data2, "anthropic")
+	if oc, _ := data2["output_config"].(map[string]interface{}); oc == nil || oc["effort"] != "max" {
+		t.Errorf("output_config.effort 的 ultra 应收敛为 max, got %v", data2["output_config"])
+	}
+}
+
+func TestInjectThinkingParams_EnabledWithoutEffortDeepSeek(t *testing.T) {
+	// thinking_mode=enabled 但服务端未配置档位：DeepSeek 通道仍需收敛客户端自带值。
+	ps := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled"})}
+	data := map[string]interface{}{
+		"model":            "deepseek-chat",
+		"reasoning_effort": "medium",
+	}
+	ps.injectThinkingParams(data, "openai")
+	if data["reasoning_effort"] != "high" {
+		t.Errorf("空档位配置下 DeepSeek medium 应收敛为 high, got %v", data["reasoning_effort"])
+	}
+
+	// Anthropic 格式：客户端残留的 output_config.effort 同样收敛。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled"})}
+	data2 := map[string]interface{}{
+		"model":         "deepseek-chat",
+		"output_config": map[string]interface{}{"effort": "xhigh"},
+	}
+	ps2.injectThinkingParams(data2, "anthropic")
+	if oc, _ := data2["output_config"].(map[string]interface{}); oc == nil || oc["effort"] != "high" {
+		t.Errorf("空档位配置下 Anthropic DeepSeek xhigh 应收敛为 high, got %v", data2["output_config"])
+	}
+
+	// 非 DeepSeek 通道保持既有行为：客户端值原样不动。
+	ps3 := &ProxyServer{config: NewSafeConfig(Config{ThinkingMode: "enabled"})}
+	data3 := map[string]interface{}{
+		"model":            "gpt-5",
+		"reasoning_effort": "medium",
+	}
+	ps3.injectThinkingParams(data3, "openai")
+	if data3["reasoning_effort"] != "medium" {
+		t.Errorf("非 DeepSeek 空档位配置下 medium 应保持 medium, got %v", data3["reasoning_effort"])
+	}
+}
+
+// ── applyRetryThinking（防循环重试链路） ─────────────────────────────────────
+
+func TestApplyRetryThinking_DeepSeekMapping(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{
+		AntiLoopRetryThinking: "enabled",
+		AntiLoopRetryEffort:   "medium",
+	})}
+	data := map[string]interface{}{"model": "deepseek-chat"}
+	ps.applyRetryThinking(data, "openai", nil)
+	if data["reasoning_effort"] != "high" {
+		t.Errorf("DeepSeek 重试 medium 应收敛为 high, got %v", data["reasoning_effort"])
+	}
+	if r, _ := data["reasoning"].(map[string]interface{}); r == nil || r["effort"] != "high" {
+		t.Errorf("重试 reasoning.effort 应同步为 high, got %v", data["reasoning"])
+	}
+
+	// 非 DeepSeek 重试模型：medium 保持 medium。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{
+		AntiLoopRetryThinking: "enabled",
+		AntiLoopRetryEffort:   "medium",
+	})}
+	data2 := map[string]interface{}{"model": "gpt-5"}
+	ps2.applyRetryThinking(data2, "openai", nil)
+	if data2["reasoning_effort"] != "medium" {
+		t.Errorf("非 DeepSeek 重试 medium 应保持 medium, got %v", data2["reasoning_effort"])
+	}
+}
+
+func TestApplyRetryThinking_AnthropicDeepSeekMapping(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{
+		AntiLoopRetryThinking: "enabled",
+		AntiLoopRetryEffort:   "xhigh",
+	})}
+	data := map[string]interface{}{"model": "deepseek-chat"}
+	ps.applyRetryThinking(data, "anthropic", nil)
+	if oc, _ := data["output_config"].(map[string]interface{}); oc == nil || oc["effort"] != "high" {
+		t.Errorf("Anthropic 重试 DeepSeek xhigh 应收敛为 high, got %v", data["output_config"])
+	}
+
+	// 非 DeepSeek 的 Anthropic 重试保持 xhigh。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{
+		AntiLoopRetryThinking: "enabled",
+		AntiLoopRetryEffort:   "xhigh",
+	})}
+	data2 := map[string]interface{}{"model": "claude-sonnet-4"}
+	ps2.applyRetryThinking(data2, "anthropic", nil)
+	if oc2, _ := data2["output_config"].(map[string]interface{}); oc2 == nil || oc2["effort"] != "xhigh" {
+		t.Errorf("非 DeepSeek Anthropic 重试 xhigh 应保持 xhigh, got %v", data2["output_config"])
 	}
 }
 

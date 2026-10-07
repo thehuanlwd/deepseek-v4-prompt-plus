@@ -4,6 +4,24 @@ All notable changes to DSPlus are documented here. This project follows the [Kee
 
 ---
 
+## [0.2.3] - 2026-10-02
+
+### Added
+- **DeepSeek-specific Reasoning Effort Mapping** — Reasoning intensity is now collapsed to DeepSeek's official tiers (`low` / `high` / `max`) when the request targets a DeepSeek-series model (model id containing `deepseek`, or an upstream on `*.deepseek.com`): `minimal → low`, `low → low`, `medium → high`, `high → high`, `xhigh → high`, `max → max`, `ultra → max`. The rule covers the configured value, the anti-loop retry value and any client-supplied effort, and is keyed on the model belonging to the DeepSeek series rather than on the vendor. Models outside that series keep the previous behavior (`ultra → max`, every other value passed through unchanged).
+
+### Fixed
+- **Test suite compilation** — `dsplus_test.go` referenced the `configPath` helper without calling it, which prevented the entire test binary from building.
+
+## [0.2.3] 中文 - 2026-10-02
+
+### Added（新增）
+- **DeepSeek 专属推理强度映射** — 当请求指向 DeepSeek 系列模型（模型名含 `deepseek`，或上游属于 `*.deepseek.com`）时，推理强度收敛到 DeepSeek 官方档位（`low` / `high` / `max`）：`minimal → low`、`low → low`、`medium → high`、`high → high`、`xhigh → high`、`max → max`、`ultra → max`。该规则覆盖服务端配置值、防循环重试值与客户端自带值，判据是「模型属于 DeepSeek 系列」而非厂商；非 DeepSeek 系列的模型维持原有行为（仅 `ultra → max`，其余档位原样透传）。
+
+### Fixed（修复）
+- **测试套件编译** — `dsplus_test.go` 中 `configPath` 未加括号调用，导致整个测试二进制无法编译。
+
+---
+
 ## [0.2.2] - 2026-09-24
 
 ### Added

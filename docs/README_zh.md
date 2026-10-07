@@ -553,7 +553,7 @@ config.json
 | `anthropic_upstream` | Anthropic 风格上游地址 |
 | `language` | GUI 语言，支持 zh / en |
 | `thinking_mode` | 不设置、强制关闭 thinking、强制开启 thinking |
-| `reasoning_effort` | 推理强度：`minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` |
+| `reasoning_effort` | 推理强度：`minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra`。DeepSeek 系列模型（模型名含 `deepseek`，或上游为 `*.deepseek.com`）会自动收敛到官方档位：`minimal→low`、`medium/xhigh→high`、`ultra→max`；非 DeepSeek 系列的模型不受影响 |
 | `system_prompt_placement` | System Prompt 拼接位置，first / last / none |
 | `extra_prompt` | 额外高优先级指令 |
 | `extra_prompt_placement` | 额外 Prompt 注入位置，first / last / none |
@@ -564,7 +564,7 @@ config.json
 | `anti_loop_enabled` | 是否启用 Anti-Loop |
 | `antiloop_retry_model` | Anti-Loop 重试模型 |
 | `antiloop_retry_thinking` | 重试时是否启用 thinking |
-| `antiloop_retry_effort` | 重试时推理强度：`minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra` |
+| `antiloop_retry_effort` | 重试时推理强度：`minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra`。DeepSeek 系列模型（模型名含 `deepseek`，或上游为 `*.deepseek.com`）会自动收敛到官方档位：`minimal→low`、`medium/xhigh→high`、`ultra→max`；非 DeepSeek 系列的模型不受影响 |
 | `antiloop_check_tokens` | 主动检测推理循环阈值，0 表示仅依赖截断兜底 |
 | `anti_hallucination_enabled` | 是否启用实验性意图确认 |
 | `anti_hallucination_prompt` | 意图确认提示语模板 |

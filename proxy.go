@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -428,9 +429,73 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sanitizeReasoningEffort 归一化推理强度档位。
-// Vercel / OpenRouter / OpenAI 兼容网关仅接受 "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"。
-// 若配置或客户端携带 "ultra"，自动安全映射至最高合法枚举 "max"，避免触发 400 invalid_request_error。
+// deepSeekEffortAliases 是 DeepSeek 系列专属的推理强度收敛表。
+// DeepSeek 官方只认 low / high / max 三档，因此把 OpenAI 标准的扩展档位收敛到官方档位；
+// 表中未列出的取值（例如关闭思考用的 "none"）保持原样透传，交由上游处理。
+var deepSeekEffortAliases = map[string]string{
+	"minimal": "low",
+	"low":     "low",
+	"medium":  "high",
+	"high":    "high",
+	"xhigh":   "high",
+	"max":     "max",
+	"ultra":   "max",
+}
+
+// isDeepSeekModel 判断当前请求是否指向 DeepSeek 系列模型，用于决定是否启用上面的收敛表。
+// 判据一：请求体 model 字段包含 "deepseek"（覆盖 deepseek-chat、deepseek-reasoner，
+// 以及 cline-pass/deepseek-v4.1-flash 这类带网关前缀的写法）。此判据与厂商无关：
+// 即使经 OpenRouter / Cline 等第三方网关，只要模型属于 DeepSeek 系列就收敛；
+// 反之，网关上的模型别名若不含 "deepseek"，则不会被识别。
+// 判据二：本次请求实际命中的上游主机属于 *.deepseek.com。
+// 注意按 format 解析真实地址：Anthropic 格式优先取 AnthropicBaseURL，
+// 因此不能用 BaseURL 一概而论，否则会漏判或误判。
+// 两者均不满足即视为非 DeepSeek，档位保持原样，不受本表影响。
+func (s *ProxyServer) isDeepSeekModel(data map[string]interface{}, format string) bool {
+	if model, ok := data["model"].(string); ok {
+		if strings.Contains(strings.ToLower(model), "deepseek") {
+			return true
+		}
+	}
+	p, ok := s.activeProvider()
+	if !ok {
+		return false
+	}
+	return isDeepSeekHost(upstreamHostname(s.resolveBaseURL(p, format)))
+}
+
+// isDeepSeekHost 判断主机名是否属于 deepseek.com（忽略大小写与 FQDN 尾点）。
+func isDeepSeekHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	return host == "deepseek.com" || strings.HasSuffix(host, ".deepseek.com")
+}
+
+// upstreamHostname 从上游地址中提取小写主机名（忽略端口与路径）；解析失败或地址为空时返回空串。
+func upstreamHostname(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+		return strings.ToLower(u.Hostname())
+	}
+	// 兼容省略 scheme 的写法，例如 "api.deepseek.com/v1"
+	if i := strings.Index(raw, "://"); i >= 0 {
+		raw = raw[i+3:]
+	}
+	raw = strings.TrimRight(raw, "/")
+	if i := strings.IndexAny(raw, "/?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	if i := strings.LastIndex(raw, ":"); i > 0 {
+		raw = raw[:i]
+	}
+	return strings.ToLower(raw)
+}
+
+// sanitizeReasoningEffort 通用归一化：非 DeepSeek 通道仅把非标准枚举 "ultra" 收敛为最高合法枚举 "max"，
+// 避免 Vercel / OpenRouter / OpenAI 兼容网关抛出 400 invalid_request_error；
+// 其余取值（含 minimal / medium / xhigh）原样透传，不损失档位语义。
 func sanitizeReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "ultra":
@@ -442,24 +507,47 @@ func sanitizeReasoningEffort(effort string) string {
 	}
 }
 
+// sanitizeReasoningEffortFor 按供应商类型选择归一化策略：
+//   - DeepSeek 系列（deepSeek=true）：按 deepSeekEffortAliases 收敛到官方 low / high / max 三档；
+//   - 其他厂商（deepSeek=false）：沿用 sanitizeReasoningEffort，档位不做收敛。
+func sanitizeReasoningEffortFor(effort string, deepSeek bool) string {
+	if !deepSeek {
+		return sanitizeReasoningEffort(effort)
+	}
+	if mapped, ok := deepSeekEffortAliases[strings.ToLower(strings.TrimSpace(effort))]; ok {
+		return mapped
+	}
+	return sanitizeReasoningEffort(effort)
+}
+
+// normalizeClientEffortFields 就地归一化客户端自带的档位字段，覆盖两种协议写法：
+// OpenAI 的 reasoning_effort / reasoning.effort 与 Anthropic 的 output_config.effort。
+func normalizeClientEffortFields(data map[string]interface{}, norm func(string) string) {
+	if eff, ok := data["reasoning_effort"].(string); ok {
+		data["reasoning_effort"] = norm(eff)
+	}
+	if reasoning, ok := data["reasoning"].(map[string]interface{}); ok {
+		if eff, ok := reasoning["effort"].(string); ok {
+			reasoning["effort"] = norm(eff)
+		}
+	}
+	if outputCfg, ok := data["output_config"].(map[string]interface{}); ok {
+		if eff, ok := outputCfg["effort"].(string); ok {
+			outputCfg["effort"] = norm(eff)
+		}
+	}
+}
+
 func (s *ProxyServer) injectThinkingParams(data map[string]interface{}, format string) {
 	cfg := s.config.Get()
 	mode := cfg.ThinkingMode
+	// DeepSeek 系列按官方档位收敛；其他厂商保持既有归一化策略不变。
+	deepSeek := s.isDeepSeekModel(data, format)
+	norm := func(effort string) string { return sanitizeReasoningEffortFor(effort, deepSeek) }
 	if mode == "" {
-		// 客户端未被服务端强制覆盖时，若客户端自身携带了 "ultra" 等非法枚举，也进行安全归一化
-		if eff, ok := data["reasoning_effort"].(string); ok {
-			data["reasoning_effort"] = sanitizeReasoningEffort(eff)
-		}
-		if reasoning, ok := data["reasoning"].(map[string]interface{}); ok {
-			if eff, ok := reasoning["effort"].(string); ok {
-				reasoning["effort"] = sanitizeReasoningEffort(eff)
-			}
-		}
-		if outputCfg, ok := data["output_config"].(map[string]interface{}); ok {
-			if eff, ok := outputCfg["effort"].(string); ok {
-				outputCfg["effort"] = sanitizeReasoningEffort(eff)
-			}
-		}
+		// 客户端未被服务端强制覆盖时，对客户端自带档位做同样的归一化：
+		// DeepSeek 系列收敛到官方档位，其他厂商仅把 "ultra" 收敛为 "max"。
+		normalizeClientEffortFields(data, norm)
 		return
 	}
 
@@ -471,9 +559,12 @@ func (s *ProxyServer) injectThinkingParams(data map[string]interface{}, format s
 		} else if mode == "enabled" {
 			data["thinking"] = map[string]interface{}{"type": "enabled"}
 			if cfg.ReasoningEffort != "" {
-				eff := sanitizeReasoningEffort(cfg.ReasoningEffort)
+				eff := norm(cfg.ReasoningEffort)
 				data["reasoning_effort"] = eff
 				data["reasoning"] = map[string]interface{}{"effort": eff}
+			} else if deepSeek {
+				// 服务端未配置档位时，客户端自带的档位在 DeepSeek 通道上同样需要收敛
+				normalizeClientEffortFields(data, norm)
 			}
 		}
 	} else if format == "anthropic" {
@@ -488,7 +579,10 @@ func (s *ProxyServer) injectThinkingParams(data map[string]interface{}, format s
 			delete(data, "reasoning_effort")
 			delete(data, "reasoning")
 			if cfg.ReasoningEffort != "" {
-				data["output_config"] = map[string]interface{}{"effort": sanitizeReasoningEffort(cfg.ReasoningEffort)}
+				data["output_config"] = map[string]interface{}{"effort": norm(cfg.ReasoningEffort)}
+			} else if deepSeek {
+				// 服务端未配置档位时，客户端残留的 output_config.effort 同样需要收敛
+				normalizeClientEffortFields(data, norm)
 			}
 		}
 	}

@@ -703,6 +703,9 @@ func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format str
 func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, format string, analysis *AntiLoopAnalysis) {
 	cfg := s.config.Get()
 	mode := cfg.AntiLoopRetryThinking
+	// DeepSeek 系列按官方档位收敛；其他厂商保持既有归一化策略不变。
+	// 注意：调用方已把 data["model"] 换成重试模型，因此这里按重试模型判定。
+	deepSeek := s.isDeepSeekModel(data, format)
 	if mode == "" {
 		// Not set: use analyzer's recommendation (or disable thinking if analysis is nil / recommends disabled)
 		if analysis == nil || !analysis.EnableThinking {
@@ -722,12 +725,12 @@ func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, format str
 			delete(data, "reasoning_effort")
 			delete(data, "reasoning")
 			if cfg.AntiLoopRetryEffort != "" {
-				data["output_config"] = map[string]interface{}{"effort": sanitizeReasoningEffort(cfg.AntiLoopRetryEffort)}
+				data["output_config"] = map[string]interface{}{"effort": sanitizeReasoningEffortFor(cfg.AntiLoopRetryEffort, deepSeek)}
 			}
 		} else {
 			data["thinking"] = map[string]interface{}{"type": "enabled"}
 			if cfg.AntiLoopRetryEffort != "" {
-				eff := sanitizeReasoningEffort(cfg.AntiLoopRetryEffort)
+				eff := sanitizeReasoningEffortFor(cfg.AntiLoopRetryEffort, deepSeek)
 				data["reasoning_effort"] = eff
 				data["reasoning"] = map[string]interface{}{"effort": eff}
 			}
