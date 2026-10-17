@@ -44,5 +44,16 @@ yorha_ui/
 .ps_history/
 其他文档/
 
+# === 设计稿与遗留资源（不参与发布）===
+test/test.txt
+web/demo.html
+web/demo_yorha.html
+web/demo_yorha_v2.html
+web/demo_yorha_v2.css
+web/theme_yorha.css
+web/theme_classic.css
+web/assets/
+favicon.ico
+
 # === 临时文件 ===
 backups/

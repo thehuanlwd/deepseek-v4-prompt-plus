@@ -420,14 +420,16 @@ DSPlus/
 ├── gui_webview.go       # CGO 模式下的 WebView2 桌面窗口与托盘
 ├── gui_fallback.go      # 非 CGO 模式下浏览器回退
 ├── ws.go                # WebSocket 实时推送
+├── route.go             # 多供应商模型路由
+├── sse.go               # SSE 行解析
 ├── web/
 │   ├── index_v2.html    # 当前主界面
 │   ├── app_v2.js        # 前端业务逻辑
-│   ├── index_v2.css     # 主样式
-│   ├── theme_yorha.css  # YoRHa 主题
-│   ├── theme_classic.css# Classic 主题
+│   ├── index_v2.css     # 主样式（已含两套主题）
 │   ├── i18n.js          # 国际化逻辑
 │   └── locales/         # zh / en 语言文件
+├── audit/               # 配置与实际请求自检（go run ./audit）
+├── test/                # 手动联调客户端与本地脚本
 ├── docs/                # 设计文档、标准和问题记录
 ├── docs/images/         # README 截图与演示图
 ├── go.mod / go.sum      # Go 模块依赖

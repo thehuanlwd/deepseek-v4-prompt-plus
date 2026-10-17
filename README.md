@@ -422,14 +422,16 @@ DSPlus/
 ├── gui_webview.go       # WebView2 desktop window and tray in CGO mode
 ├── gui_fallback.go      # Browser fallback in non-CGO mode
 ├── ws.go                # WebSocket real-time push
+├── route.go             # Multi-provider model routing
+├── sse.go               # SSE line parsing
 ├── web/
 │   ├── index_v2.html    # Current main UI
 │   ├── app_v2.js        # Frontend business logic
-│   ├── index_v2.css     # Main styles
-│   ├── theme_yorha.css  # YoRHa theme
-│   ├── theme_classic.css# Classic theme
+│   ├── index_v2.css     # Main styles, both themes included
 │   ├── i18n.js          # Internationalization logic
 │   └── locales/         # zh / en language files
+├── audit/               # Config-vs-actual self-check (go run ./audit)
+├── test/                # Manual integration clients and local scripts
 ├── docs/                # Design docs, specs, and issue records
 ├── docs/images/         # README screenshots and demo images
 ├── go.mod / go.sum      # Go module dependencies
