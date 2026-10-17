@@ -106,6 +106,8 @@ func handleGUI(w http.ResponseWriter, r *http.Request, l *Logger, cfg *SafeConfi
 		handleAPIFetchModels(w, r)
 	case path == "/providers/test-llm" && r.Method == "POST":
 		handleAPIProviderTestLLM(w, r)
+	case path == "/route/preview" && r.Method == "GET":
+		handleAPIRoutePreview(w, r, cfg)
 	case path == "/restart" && r.Method == "POST":
 		handleAPIRestart(w, r)
 	default:
@@ -202,6 +204,7 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 	}
 
 	var reasons []string
+	var warnings []string
 	var restartRequired bool
 	var err error
 	changed := false
@@ -233,6 +236,12 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 					p := Provider{}
 					if n, ok := m["name"].(string); ok {
 						p.Name = n
+					}
+					if id, ok := m["id"].(string); ok {
+						p.ID = strings.TrimSpace(id)
+					}
+					if en, ok := m["enabled"].(bool); ok {
+						p.Enabled = boolPtr(en)
 					}
 				if b, ok := m["base_url"].(string); ok {
 					p.BaseURL = strings.TrimRight(b, "/")
@@ -277,17 +286,19 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 					provs = append(provs, p)
 				}
 				if len(provs) > 0 {
+					// 服务端兜底：ID 缺失、非法或重复时自动补齐修正，并强制默认供应商（第一位）保持启用。
+					before := providerIDsSignature(provs)
+					normalizeProviders(provs)
+					if providerIDsSignature(provs) != before {
+						warnings = append(warnings, "供应商 ID 存在缺失、非法或重复，已自动修正")
+					}
 					c.Providers = provs
 					changed = true
 				}
 			}
 		}
-		if v, ok := updates["active_provider"]; ok {
-			if s, ok := v.(string); ok && s != "" && c.ActiveProvider != s {
-				c.ActiveProvider = s
-				changed = true
-			}
-		}
+		// active_provider 为保留字段：默认供应商由供应商列表第一位决定，
+		// 前端提交的旧值不再生效（保存时统一对齐到第一位）。
 		// Port: must be in valid range.
 		if v, ok := updates["port"]; ok {
 			if f, ok := v.(float64); ok && f > 0 && f < 65536 {
@@ -370,14 +381,59 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 	}
 
 	if changed {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		resp := map[string]interface{}{
 			"status":           "saved",
 			"restart_required": restartRequired,
 			"restart_reasons":  reasons,
-		})
+		}
+		if len(warnings) > 0 {
+			resp["warnings"] = warnings
+		}
+		json.NewEncoder(w).Encode(resp)
 	} else {
 		json.NewEncoder(w).Encode(map[string]string{"status": "unchanged"})
 	}
+}
+
+// handleAPIRoutePreview 返回当前配置构建出的模型路由表，供界面展示对外模型名、冲突与遮蔽状态。
+// 前端不重复实现冲突计算，统一以此接口为单一真相源。
+func handleAPIRoutePreview(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
+	rt := buildRouteTable(cfg.Get())
+	conflicted, unroutable := rt.Stats()
+	defaultProvider := ""
+	if p, _, ok := rt.DefaultProvider(); ok {
+		defaultProvider = p.Name
+	}
+
+	type routeModelItem struct {
+		PublicID     string `json:"public_id"`
+		UpstreamID   string `json:"upstream_id"`
+		Group        string `json:"group,omitempty"`
+		ProviderID   string `json:"provider_id"`
+		ProviderName string `json:"provider_name"`
+		Conflicted   bool   `json:"conflicted"`
+		Unroutable   bool   `json:"unroutable"`
+	}
+	items := make([]routeModelItem, 0, 16)
+	for _, e := range rt.ListModels() {
+		items = append(items, routeModelItem{
+			PublicID:     e.PublicModelID,
+			UpstreamID:   e.UpstreamModelID,
+			Group:        e.Group,
+			ProviderID:   e.ProviderID,
+			ProviderName: e.ProviderName,
+			Conflicted:   e.Conflicted,
+			Unroutable:   e.Unroutable,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"models":           items,
+		"conflicted":       conflicted,
+		"unroutable":       unroutable,
+		"default_provider": defaultProvider,
+	})
 }
 
 func handleAPIRestart(w http.ResponseWriter, r *http.Request) {

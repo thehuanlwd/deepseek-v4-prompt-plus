@@ -185,16 +185,16 @@ func detectBufferFinishReason(body []byte) string {
 
 // handleAntiLoop orchestrates the retry flow (non-streaming path).
 // It analyzes, builds, executes, and returns the final response body.
-func (s *ProxyServer) handleAntiLoop(transformedBody []byte, format string, reasoningContent string) []byte {
+func (s *ProxyServer) handleAntiLoop(transformedBody []byte, format string, reasoningContent string, prov Provider) []byte {
 	log.Printf("[antiloop] detected finish_reason=length for %s request, starting analysis", format)
 
-	retryBody, err := s.runAntiLoopAnalysis(transformedBody, format, "", reasoningContent)
+	retryBody, err := s.runAntiLoopAnalysis(transformedBody, format, "", reasoningContent, prov)
 	if err != nil {
 		log.Printf("[antiloop] analyzer failed: %v, falling back to simple retry", err)
-		retryBody = s.buildSimpleRetryRequest(transformedBody, format, "", reasoningContent)
+		retryBody = s.buildSimpleRetryRequest(transformedBody, format, "", reasoningContent, prov)
 	}
 
-	respBody, fr := s.executeRetry(retryBody, format)
+	respBody, fr := s.executeRetry(retryBody, format, prov)
 	if fr == "length" || fr == "max_tokens" {
 		log.Printf("[antiloop] retry also hit limit, giving up")
 		return hardLimitMessages(format)
@@ -208,14 +208,14 @@ func (s *ProxyServer) handleAntiLoop(transformedBody []byte, format string, reas
 // phase1Content: the assistant's truncated output from Phase 1.
 // reasoningContent: the raw reasoning_content from Phase 1 (sent to analyzer AND injected in retry).
 // Returns the retry request body ready for execution, or an error if analysis failed.
-func (s *ProxyServer) runAntiLoopAnalysis(transformedBody []byte, format string, phase1Content string, reasoningContent string) ([]byte, error) {
-	analysis, err := s.callAntiLoopAnalyzer(transformedBody, format, reasoningContent)
+func (s *ProxyServer) runAntiLoopAnalysis(transformedBody []byte, format string, phase1Content string, reasoningContent string, prov Provider) ([]byte, error) {
+	analysis, err := s.callAntiLoopAnalyzer(transformedBody, format, reasoningContent, prov)
 	if err != nil {
 		return nil, err
 	}
 
 	log.Printf("[antiloop] analysis: judgment=%s enable_thinking=%v", analysis.Judgment, analysis.EnableThinking)
-	retryBody := s.buildGuidedRetryRequest(transformedBody, format, analysis, phase1Content, reasoningContent, false)
+	retryBody := s.buildGuidedRetryRequest(transformedBody, format, analysis, phase1Content, reasoningContent, false, prov)
 	return retryBody, nil
 }
 
@@ -255,6 +255,7 @@ func (s *ProxyServer) executeAndStreamRetry(
 	format string,
 	capture *captureBuffer,
 	streamID string,
+	prov Provider,
 ) (string, *TokenUsage) {
 	startTime := time.Now()
 	reqID := nextTraceReqID()
@@ -264,7 +265,7 @@ func (s *ProxyServer) executeAndStreamRetry(
 	log.Printf("[antiloop] retry attempt: reqID=%d format=%s streamID=%s body_bytes=%d", reqID, format, streamID, len(body))
 	traceKeyvals("event", "retry_attempt", "req_id", reqID, "format", format, "body_bytes", len(body))
 
-	retryResp, err := s.executeRetryCall(body, format)
+	retryResp, err := s.executeRetryCall(body, format, prov)
 	if err != nil {
 		log.Printf("[antiloop] reqID=%d retry call failed: %v", reqID, err)
 		s.logger.Add(LogEntry{
@@ -400,8 +401,7 @@ func (s *ProxyServer) streamHardLimitSSE(w http.ResponseWriter, flusher http.Flu
 
 // executeRetryCall makes the retry HTTP request and returns the response for streaming.
 // Caller is responsible for closing resp.Body.
-func (s *ProxyServer) executeRetryCall(body []byte, format string) (*http.Response, error) {
-	prov, _ := s.activeProvider()
+func (s *ProxyServer) executeRetryCall(body []byte, format string, prov Provider) (*http.Response, error) {
 	upstream := s.resolveBaseURL(prov, format)
 	path := "/chat/completions"
 	if format == "anthropic" {
@@ -413,7 +413,7 @@ func (s *ProxyServer) executeRetryCall(body []byte, format string) (*http.Respon
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	key := s.activeAPIKey()
+	key := s.providerAPIKey(prov)
 	req.Header.Set("Authorization", "Bearer "+key)
 	if format == "anthropic" {
 		req.Header.Set("x-api-key", key)
@@ -421,12 +421,12 @@ func (s *ProxyServer) executeRetryCall(body []byte, format string) (*http.Respon
 
 	return s.client.Do(req)
 }
-func (s *ProxyServer) callAntiLoopAnalyzer(transformedBody []byte, format string, reasoningContent string) (*AntiLoopAnalysis, error) {
+func (s *ProxyServer) callAntiLoopAnalyzer(transformedBody []byte, format string, reasoningContent string, prov Provider) (*AntiLoopAnalysis, error) {
 	analysisBody, err := buildAnalyzerRequest(transformedBody, format, reasoningContent)
 	if err != nil {
 		return nil, fmt.Errorf("build analyzer request: %w", err)
 	}
-	return s.callAntiLoopAnalyzerWith(analysisBody, "思维分析")
+	return s.callAntiLoopAnalyzerWith(analysisBody, "思维分析", prov)
 }
 
 // parallelAnalyze is called from a goroutine to analyze the in-progress thinking.
@@ -437,8 +437,9 @@ func (s *ProxyServer) parallelAnalyze(
 	format string,
 	reasoningSnapshot string,
 	phase1Content string,
+	prov Provider,
 ) {
-	analysis, err := s.callAntiLoopAnalyzerPartial(transformedBody, format, reasoningSnapshot, phase1Content)
+	analysis, err := s.callAntiLoopAnalyzerPartial(transformedBody, format, reasoningSnapshot, phase1Content, prov)
 	done <- analyzeResult{analysis, err}
 }
 
@@ -449,29 +450,31 @@ func (s *ProxyServer) callAntiLoopAnalyzerPartial(
 	format string,
 	reasoningContent string,
 	phase1Content string,
+	prov Provider,
 ) (*AntiLoopAnalysis, error) {
 	analysisBody, err := buildAnalyzerRequestPartial(transformedBody, format, reasoningContent, phase1Content)
 	if err != nil {
 		return nil, fmt.Errorf("build partial analyzer request: %w", err)
 	}
-	return s.callAntiLoopAnalyzerWith(analysisBody, "并行思维分析")
+	return s.callAntiLoopAnalyzerWith(analysisBody, "并行思维分析", prov)
 }
 
 // callAntiLoopAnalyzerWith is the unified implementation for calling the analyzer
 // sub-agent.  pathLabel distinguishes the two call sites in log entries.
-func (s *ProxyServer) callAntiLoopAnalyzerWith(analysisBody []byte, pathLabel string) (*AntiLoopAnalysis, error) {
+// prov 为本次请求命中的供应商：分析子Agent与主请求共用同一上游，避免多供应商下打到别家。
+func (s *ProxyServer) callAntiLoopAnalyzerWith(analysisBody []byte, pathLabel string, prov Provider) (*AntiLoopAnalysis, error) {
 	startTime := time.Now()
 	cfg := s.config.Get()
-	prov, _ := s.activeProvider()
 
-	upstreamURL := joinUpstream(prov.BaseURL, "/chat/completions")
+	// 分析子Agent固定走 OpenAI 格式端点；按格式解析可避免忽略 AnthropicBaseURL 的旧硬编码问题。
+	upstreamURL := joinUpstream(s.resolveBaseURL(prov, "openai"), "/chat/completions")
 
 	req, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(analysisBody))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.activeAPIKey())
+	req.Header.Set("Authorization", "Bearer "+s.providerAPIKey(prov))
 
 	client := &http.Client{Timeout: analyzerTimeout}
 	resp, err := client.Do(req)
@@ -575,7 +578,7 @@ func (s *ProxyServer) callAntiLoopAnalyzerWith(analysisBody []byte, pathLabel st
 		resp.StatusCode,
 		time.Since(startTime).Milliseconds(),
 		"deepseek-chat",
-		s.activeBaseURL(),
+		s.resolveBaseURL(prov, "openai"),
 		buildRequestMeta(analyzerBody, "openai", false, false),
 		ResponseMeta{
 			AnalyzerJudgment: analysis.Judgment,
@@ -672,7 +675,7 @@ func buildAnalyzerRequestWith(transformedBody []byte, reasoningContent, phase1Co
 
 // buildGuidedRetryRequest creates the retry request body with full context from Phase 1,
 // the analyzer's guidance, and the configured retry model/thinking settings.
-func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format string, analysis *AntiLoopAnalysis, phase1Content string, reasoningContent string, earlyStop bool) []byte {
+func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format string, analysis *AntiLoopAnalysis, phase1Content string, reasoningContent string, earlyStop bool, prov Provider) []byte {
 	var data map[string]interface{}
 	if err := json.Unmarshal(transformedBody, &data); err != nil {
 		return transformedBody
@@ -687,7 +690,7 @@ func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format str
 	delete(data, "max_tokens")
 
 	// 3. Apply retry thinking configuration
-	s.applyRetryThinking(data, format, analysis)
+	s.applyRetryThinking(data, format, analysis, prov)
 
 	// 4. Append Phase 1 context as new messages
 	s.injectRetryContext(data, format, phase1Content, reasoningContent, analysis, earlyStop)
@@ -700,12 +703,12 @@ func (s *ProxyServer) buildGuidedRetryRequest(transformedBody []byte, format str
 }
 
 // applyRetryThinking sets thinking/effort on the retry request based on config + analysis and request format.
-func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, format string, analysis *AntiLoopAnalysis) {
+func (s *ProxyServer) applyRetryThinking(data map[string]interface{}, format string, analysis *AntiLoopAnalysis, prov Provider) {
 	cfg := s.config.Get()
 	mode := cfg.AntiLoopRetryThinking
 	// DeepSeek 系列按官方档位收敛；其他厂商保持既有归一化策略不变。
-	// 注意：调用方已把 data["model"] 换成重试模型，因此这里按重试模型判定。
-	deepSeek := s.isDeepSeekModel(data, format)
+	// 注意：调用方已把 data["model"] 换成重试模型，因此这里按重试模型与命中供应商共同判定。
+	deepSeek := s.isDeepSeekModelFor(data, format, prov)
 	if mode == "" {
 		// Not set: use analyzer's recommendation (or disable thinking if analysis is nil / recommends disabled)
 		if analysis == nil || !analysis.EnableThinking {
@@ -801,7 +804,7 @@ func (s *ProxyServer) injectRetryContext(data map[string]interface{}, format str
 }
 
 // buildSimpleRetryRequest creates a retry request with generic guidance (no analyzer).
-func (s *ProxyServer) buildSimpleRetryRequest(transformedBody []byte, format string, phase1Content string, reasoningContent string) []byte {
+func (s *ProxyServer) buildSimpleRetryRequest(transformedBody []byte, format string, phase1Content string, reasoningContent string, prov Provider) []byte {
 	var data map[string]interface{}
 	if err := json.Unmarshal(transformedBody, &data); err != nil {
 		return transformedBody
@@ -816,7 +819,7 @@ func (s *ProxyServer) buildSimpleRetryRequest(transformedBody []byte, format str
 	delete(data, "max_tokens")
 
 	// Apply retry thinking config (disabled by default)
-	s.applyRetryThinking(data, format, nil)
+	s.applyRetryThinking(data, format, nil, prov)
 
 	// Inject Phase 1 context
 	s.injectRetryContext(data, format, phase1Content, reasoningContent, nil, false)
@@ -830,10 +833,9 @@ func (s *ProxyServer) buildSimpleRetryRequest(transformedBody []byte, format str
 
 // executeRetry sends the retry request to the upstream API and returns the
 // full response body along with the finish_reason.
-func (s *ProxyServer) executeRetry(body []byte, format string) (responseBody []byte, finishReason string) {
+func (s *ProxyServer) executeRetry(body []byte, format string, prov Provider) (responseBody []byte, finishReason string) {
 	startTime := time.Now()
 	cfg := s.config.Get()
-	prov, _ := s.activeProvider()
 
 	upstream := s.resolveBaseURL(prov, format)
 	path := "/chat/completions"
@@ -847,7 +849,7 @@ func (s *ProxyServer) executeRetry(body []byte, format string) (responseBody []b
 		return hardLimitMessages(format), "stop"
 	}
 	req.Header.Set("Content-Type", "application/json")
-	key := s.activeAPIKey()
+	key := s.providerAPIKey(prov)
 	req.Header.Set("Authorization", "Bearer "+key)
 	if format == "anthropic" {
 		req.Header.Set("x-api-key", key)

@@ -1120,13 +1120,75 @@ async function loadSettings() {
 }
 
 // ── 供应商（多上游）管理 ──
+// 语义：数组顺序即优先级，第一位是默认供应商（路由未命中时的兜底目标）；启用开关决定是否参与路由。
 let providersData = [];
-let activeProviderIndex = 0;
+let activeProviderIndex = 0; // 保留变量：恒为 0（第一位即默认供应商）
 let persistProvidersTimer = null;
+
+// 路由表预览缓存：由后端 /api/route/preview 提供，前端不重复计算冲突
+let routePreview = { models: [], byPublicId: {}, byProviderModel: {}, conflicted: 0, unroutable: 0, defaultProvider: '' };
+
+const PROVIDER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+function isValidProviderId(id) {
+  return PROVIDER_ID_PATTERN.test((id || '').trim());
+}
+
+// 返回与给定 ID 冲突的其它供应商下标（不区分大小写）；excludeIdx 为需要排除的下标
+function findProviderIdConflict(id, excludeIdx) {
+  const key = (id || '').trim().toLowerCase();
+  if (!key) return -1;
+  return providersData.findIndex((p, i) => i !== excludeIdx && (p.ID || '').trim().toLowerCase() === key);
+}
+
+// 由名称推导一个合法且未被占用的供应商 ID：英文名称取同名，否则 providerN；冲突自动追加序号
+function generateProviderId(name) {
+  const trimmed = (name || '').trim();
+  let base = isValidProviderId(trimmed) ? trimmed : '';
+  if (!base) {
+    let n = 1;
+    do {
+      base = 'provider' + n;
+      n++;
+    } while (findProviderIdConflict(base, -1) >= 0);
+  }
+  let id = base;
+  let seq = 2;
+  while (findProviderIdConflict(id, -1) >= 0) {
+    id = base + seq;
+    seq++;
+  }
+  return id;
+}
+
+async function refreshRoutePreview() {
+  try {
+    const r = await fetch('/api/route/preview');
+    const data = await r.json();
+    const byPublicId = {};
+    const byProviderModel = {};
+    (data.models || []).forEach(m => {
+      byPublicId[m.public_id] = m;
+      byProviderModel[(m.provider_id || '') + '||' + (m.upstream_id || '')] = m;
+    });
+    routePreview = {
+      models: data.models || [],
+      byPublicId,
+      byProviderModel,
+      conflicted: data.conflicted || 0,
+      unroutable: data.unroutable || 0,
+      defaultProvider: data.default_provider || ''
+    };
+  } catch (e) {
+    routePreview = { models: [], byPublicId: {}, byProviderModel: {}, conflicted: 0, unroutable: 0, defaultProvider: '' };
+  }
+}
 
 function renderProviders(providers, active) {
   providersData = (providers || []).map(p => ({
+    ID: p.id || '',
     Name: p.name || '',
+    Enabled: p.enabled !== false,
     BaseURL: p.base_url || '',
     AnthropicBaseURL: p.anthropic_base_url || '',
     APIKey: p.api_key || '',
@@ -1138,30 +1200,43 @@ function renderProviders(providers, active) {
     })) : []
   }));
   if (providersData.length === 0) {
-    providersData = [{ Name: 'DeepSeek', BaseURL: 'https://api.deepseek.com', AnthropicBaseURL: '', APIKey: '', Models: [] }];
+    providersData = [{ ID: 'DeepSeek', Name: 'DeepSeek', Enabled: true, BaseURL: 'https://api.deepseek.com', AnthropicBaseURL: '', APIKey: '', Models: [] }];
   }
-  activeProviderIndex = 0;
-  const ai = providersData.findIndex(p => p.Name === active);
-  if (ai >= 0) activeProviderIndex = ai;
-  populateProviderSelect();
+  providersData.forEach(p => { if (!p.ID) p.ID = generateProviderId(p.Name); });
+  activeProviderIndex = 0; // 默认供应商 = 列表第一位
   fillProviderEditor();
+  updateDefaultProviderLabel();
 
   if (typeof renderModelProvidersList === 'function') {
-    renderModelProvidersList();
-    renderCurrentProviderDetail();
+    refreshRoutePreview().then(() => {
+      renderModelProvidersList();
+      renderCurrentProviderDetail();
+    });
   }
+}
+
+function updateDefaultProviderLabel() {
+  const el = $('cfgDefaultProviderName');
+  if (!el) return;
+  const first = providersData[0];
+  el.textContent = first ? `${first.Name || '(未命名)'} / ${first.ID || ''}` : '—';
+}
+
+function providerPayload(p, idx) {
+  return {
+    id: p.ID,
+    name: p.Name,
+    enabled: idx === 0 ? true : p.Enabled !== false, // 第一位（默认供应商）不可关闭
+    base_url: p.BaseURL,
+    anthropic_base_url: p.AnthropicBaseURL,
+    api_key: p.APIKey,
+    models: p.Models || []
+  };
 }
 
 async function persistProvidersConfig(silent = false) {
   const payload = {
-    providers: providersData.map(p => ({
-      name: p.Name,
-      base_url: p.BaseURL,
-      anthropic_base_url: p.AnthropicBaseURL,
-      api_key: p.APIKey,
-      models: p.Models || []
-    })),
-    active_provider: providersData[activeProviderIndex] ? providersData[activeProviderIndex].Name : ''
+    providers: providersData.map((p, i) => providerPayload(p, i))
   };
 
   try {
@@ -1172,9 +1247,12 @@ async function persistProvidersConfig(silent = false) {
     });
     const resp = await r.json();
     setRestartBanner(resp.restart_required, resp.restart_reasons);
-    if (!silent) {
+    if (resp.warnings && resp.warnings.length) {
+      triggerAlert(resp.warnings.join('；'));
+    } else if (!silent) {
       triggerAlert(t('alert.saved') || '配置已保存');
     }
+    await refreshRoutePreview();
   } catch (e) {
     if (!silent) {
       triggerAlert(t('alert.save_failed') || '保存配置失败');
@@ -1189,55 +1267,9 @@ function debouncePersistProviders(delayMs = 600) {
   }, delayMs);
 }
 
-function populateProviderSelect() {
-  const sel = $('cfgActiveProvider');
-  sel.innerHTML = '';
-  providersData.forEach((p, i) => {
-    const opt = document.createElement('option');
-    opt.value = String(i);
-    opt.textContent = p.Name || ('(未命名 ' + i + ')');
-    sel.appendChild(opt);
-  });
-  sel.value = String(activeProviderIndex);
-  refreshProviderDropdown();
-}
-
-// 若供应商下拉已被转为自定义组件，则按当前 option 重建触发文字与选项列表
-function refreshProviderDropdown() {
-  const sel = $('cfgActiveProvider');
-  if (!sel) return;
-  const wrapper = sel.parentElement;
-  if (!wrapper || !wrapper.classList.contains('yorha-select-wrapper')) return;
-  const trigger = wrapper.querySelector('.yorha-select-trigger');
-  const optionsContainer = wrapper.querySelector('.yorha-select-options');
-  if (!trigger || !optionsContainer) return;
-
-  const selectedOption = sel.options[sel.selectedIndex];
-  trigger.textContent = selectedOption ? selectedOption.textContent : '';
-
-  optionsContainer.innerHTML = '';
-  Array.from(sel.options).forEach((opt, idx) => {
-    const item = document.createElement('div');
-    item.className = 'yorha-select-option-item';
-    if (idx === sel.selectedIndex) item.classList.add('selected');
-    item.textContent = opt.textContent;
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      sel.selectedIndex = idx;
-      trigger.textContent = opt.textContent;
-      Array.from(optionsContainer.children).forEach((c, i) => {
-        if (i === idx) c.classList.add('selected');
-        else c.classList.remove('selected');
-      });
-      wrapper.classList.remove('open');
-      sel.dispatchEvent(new Event('change'));
-    });
-    optionsContainer.appendChild(item);
-  });
-}
-
+// 设置页供应商编辑区：始终对应默认供应商（列表第一位），名称/地址/密钥在此直接编辑
 function fillProviderEditor() {
-  const p = providersData[activeProviderIndex];
+  const p = providersData[0];
   if (!p) return;
   $('cfgProviderName').value = p.Name || '';
   $('cfgProviderBase').value = p.BaseURL || '';
@@ -1246,44 +1278,14 @@ function fillProviderEditor() {
 }
 
 function syncProviderFromEditor() {
-  const p = providersData[activeProviderIndex];
+  const p = providersData[0];
   if (!p) return;
-  const oldName = p.Name;
   p.Name = $('cfgProviderName').value;
   p.BaseURL = $('cfgProviderBase').value;
   p.AnthropicBaseURL = $('cfgProviderAnthropicBase').value;
   p.APIKey = $('cfgProviderKey').value;
-  if (oldName !== p.Name) {
-    const opt = $('cfgActiveProvider').querySelector('option[value="' + activeProviderIndex + '"]');
-    if (opt) opt.textContent = p.Name || ('(未命名 ' + activeProviderIndex + ')');
-    refreshProviderDropdown();
-  }
-}
-
-function onActiveProviderChange() {
-  syncProviderFromEditor(); // 先保存当前正在编辑的供应商
-  activeProviderIndex = parseInt($('cfgActiveProvider').value) || 0;
-  fillProviderEditor();
-}
-
-function addProvider() {
-  syncProviderFromEditor();
-  providersData.push({ Name: '新供应商', BaseURL: '', AnthropicBaseURL: '', APIKey: '' });
-  activeProviderIndex = providersData.length - 1;
-  populateProviderSelect();
-  fillProviderEditor();
-}
-
-function deleteProvider() {
-  syncProviderFromEditor();
-  if (providersData.length <= 1) {
-    triggerAlert(t('settings.provider_delete_last') || '至少保留一个供应商');
-    return;
-  }
-  providersData.splice(activeProviderIndex, 1);
-  if (activeProviderIndex >= providersData.length) activeProviderIndex = providersData.length - 1;
-  populateProviderSelect();
-  fillProviderEditor();
+  updateDefaultProviderLabel();
+  if (typeof renderModelProvidersList === 'function') renderModelProvidersList();
 }
 
 function toggleProviderKeyVisibility() {
@@ -1304,14 +1306,7 @@ async function saveSettings() {
   const payload = {
     port: parseInt($('cfgPort').value) || 8188,
     lan_access: $('cfgLanAccess').checked,
-    providers: providersData.map(p => ({
-      name: p.Name,
-      base_url: p.BaseURL,
-      anthropic_base_url: p.AnthropicBaseURL,
-      api_key: p.APIKey,
-      models: p.Models || []
-    })),
-    active_provider: providersData[activeProviderIndex] ? providersData[activeProviderIndex].Name : '',
+    providers: providersData.map((p, i) => providerPayload(p, i)),
     verbose_logging: $('cfgVerbose').checked,
     thinking_mode: $('cfgThinkingMode').value,
     reasoning_effort: $('cfgReasoningEffort').value,
@@ -2781,12 +2776,15 @@ async function initModelServicesPage() {
   } else {
     curModelProviderIdx = 0;
   }
+  await refreshRoutePreview(); // 进入页面时拉取一次路由表，保证冲突徽标为最新
   renderModelProvidersList();
   renderCurrentProviderDetail();
   modelServicesInitialized = true;
 }
 
-// ── 渲染左栏供应商列表 ──
+// ── 渲染左栏供应商列表（拖拽排序 + 多选启用开关） ──
+let providerDragIndex = -1;
+
 function renderModelProvidersList() {
   const container = $('modelProviderListContainer');
   if (!container) return;
@@ -2794,7 +2792,10 @@ function renderModelProvidersList() {
 
   const searchKeyword = ($('modelProviderSearchInput')?.value || '').trim().toLowerCase();
   const countBadge = $('modelProviderCountBadge');
-  if (countBadge) countBadge.textContent = providersData.length;
+  if (countBadge) {
+    const enabledCount = providersData.filter((p, i) => i === 0 || p.Enabled !== false).length;
+    countBadge.textContent = `已启用 ${enabledCount} / 共 ${providersData.length}`;
+  }
 
   if (curModelProviderIdx >= providersData.length) {
     curModelProviderIdx = Math.max(0, providersData.length - 1);
@@ -2806,27 +2807,32 @@ function renderModelProvidersList() {
       return;
     }
 
-    const isExternal = (idx === activeProviderIndex);
+    const isDefault = (idx === 0);
+    const isOn = isDefault || provider.Enabled !== false;
     const item = document.createElement('div');
     item.className = 'provider-list-item' + (idx === curModelProviderIdx ? ' active' : '');
+    item.draggable = true;
+    item.dataset.index = String(idx);
 
     const iconLetter = (pName.charAt(0) || 'P').toUpperCase();
-    const externalTagHtml = isExternal ? `<span class="provider-external-tag">[对外]</span>` : '';
-    const modelsCountText = provider.Models && provider.Models.length > 0 ? `${provider.Models.length} 模型` : '穿透模式';
+    const defaultTagHtml = isDefault ? `<span class="provider-default-tag">默认</span>` : '';
+    const modelsCountText = provider.Models && provider.Models.length > 0 ? `${provider.Models.length} 模型` : '未配置模型清单';
+    const idText = provider.ID || '(无 ID)';
 
     item.innerHTML = `
+      <div class="provider-drag-handle" title="拖拽调整顺序，第一位为默认供应商"><span></span><span></span><span></span></div>
       <div class="provider-icon-badge">${escapeHtml(iconLetter)}</div>
       <div class="provider-info-col">
         <div class="provider-info-name-row">
           <span class="provider-info-name" title="${escapeHtml(pName)}">${escapeHtml(pName)}</span>
-          ${externalTagHtml}
+          ${defaultTagHtml}
         </div>
         <div style="font-size: 10px; opacity: 0.7; font-family: monospace;">
-          ${modelsCountText}
+          ${escapeHtml(idText)} · ${modelsCountText}
         </div>
       </div>
-      <label class="yorha-switch" style="flex-shrink: 0;" title="切换为当前对外供应商 (单选)" onclick="event.stopPropagation()">
-        <input type="checkbox" ${isExternal ? 'checked' : ''} onchange="toggleProviderExternal(${idx}, this.checked)">
+      <label class="yorha-switch" style="flex-shrink: 0;" title="${isDefault ? '默认供应商不可关闭' : '启用后参与模型路由'}" onclick="event.stopPropagation()">
+        <input type="checkbox" ${isOn ? 'checked' : ''} ${isDefault ? 'disabled' : ''} onchange="toggleProviderEnabled(${idx}, this.checked)">
         <span class="yorha-slider"></span>
       </label>
     `;
@@ -2839,37 +2845,92 @@ function renderModelProvidersList() {
       }
     });
 
+    attachProviderDragEvents(item, idx);
     container.appendChild(item);
   });
+}
+
+// ── 拖拽排序：拖拽期间暂停自动保存，落位后统一提交一次，避免顺序抖动 ──
+function attachProviderDragEvents(item, idx) {
+  item.addEventListener('dragstart', (e) => {
+    providerDragIndex = idx;
+    item.classList.add('dragging');
+    if (persistProvidersTimer) {
+      clearTimeout(persistProvidersTimer);
+      persistProvidersTimer = null;
+    }
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(idx));
+    }
+  });
+
+  item.addEventListener('dragover', (e) => {
+    if (providerDragIndex < 0 || providerDragIndex === idx) return;
+    e.preventDefault();
+    const rect = item.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height / 2;
+    item.classList.toggle('drop-after', after);
+    item.classList.toggle('drop-before', !after);
+  });
+
+  item.addEventListener('dragleave', () => {
+    item.classList.remove('drop-before', 'drop-after');
+  });
+
+  item.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (providerDragIndex < 0 || providerDragIndex === idx) return;
+    const rect = item.getBoundingClientRect();
+    const after = (e.clientY - rect.top) > rect.height / 2;
+    moveProvider(providerDragIndex, idx, after);
+  });
+
+  item.addEventListener('dragend', () => {
+    providerDragIndex = -1;
+    document.querySelectorAll('.provider-list-item').forEach(el => {
+      el.classList.remove('dragging', 'drop-before', 'drop-after');
+    });
+  });
+}
+
+async function moveProvider(from, to, after) {
+  if (from < 0 || from >= providersData.length) return;
+  const [moved] = providersData.splice(from, 1);
+  let target = after ? to + 1 : to;
+  if (from < target) target--;
+  target = Math.max(0, Math.min(target, providersData.length));
+  providersData.splice(target, 0, moved);
+
+  activeProviderIndex = 0;
+  curModelProviderIdx = target;
+  fillProviderEditor();
+  updateDefaultProviderLabel();
+  renderModelProvidersList();
+  renderCurrentProviderDetail();
+  await persistProvidersConfig(true);
+  triggerAlert(`顺序已更新，默认供应商：[ ${providersData[0] ? providersData[0].Name : ''} ]`);
 }
 
 function filterProvidersListUI() {
   renderModelProvidersList();
 }
 
-// ── 切换对外生效的供应商 (单选互斥) ──
-async function toggleProviderExternal(idx, checked) {
-  if (!checked && idx === activeProviderIndex) {
+// ── 启用开关：关闭的供应商不参与模型路由（第一位为默认供应商，不可关闭） ──
+async function toggleProviderEnabled(idx, checked) {
+  const p = providersData[idx];
+  if (!p) return;
+  if (idx === 0) {
+    p.Enabled = true;
     renderModelProvidersList();
+    triggerAlert('默认供应商不可关闭');
     return;
   }
-
-  activeProviderIndex = idx;
-  const targetProvider = providersData[activeProviderIndex];
-
-  // 同步系统设置页面的下拉框
-  const sel = $('cfgActiveProvider');
-  if (sel) {
-    sel.value = String(activeProviderIndex);
-    refreshProviderDropdown();
-    fillProviderEditor();
-  }
-
+  p.Enabled = !!checked;
   renderModelProvidersList();
-  renderCurrentProviderDetail();
-
   await persistProvidersConfig(true);
-  triggerAlert(`已切换对外服务供应商: [ ${targetProvider?.Name} ]`);
+  renderCurrentProviderDetail();
+  triggerAlert(checked ? `供应商 [ ${p.Name} ] 已启用` : `供应商 [ ${p.Name} ] 已停用，不再参与路由`);
 }
 
 // ── 渲染右栏当前选中供应商详情 ──
@@ -2878,6 +2939,8 @@ function renderCurrentProviderDetail() {
   if (!p) return;
 
   $('curProviderNameInput').value = p.Name || '';
+  const idInput = $('curProviderIdInput');
+  if (idInput) idInput.value = p.ID || '';
   $('curProviderApiKey').value = p.APIKey || '';
   $('curProviderBaseUrl').value = p.BaseURL || '';
   $('curProviderAnthropicUrl').value = p.AnthropicBaseURL || '';
@@ -2898,13 +2961,45 @@ function onCurProviderNameChange(val) {
   const activeItem = document.querySelector('.provider-list-item.active .provider-info-name');
   if (activeItem) activeItem.textContent = val;
 
-  const opt = $('cfgActiveProvider')?.querySelector(`option[value="${curModelProviderIdx}"]`);
-  if (opt) {
-    opt.textContent = val;
-    refreshProviderDropdown();
+  if (curModelProviderIdx === 0) {
+    updateDefaultProviderLabel();
+    fillProviderEditor();
   }
 
   debouncePersistProviders(800);
+}
+
+// 供应商 ID 输入：实时校验字符与全局唯一性，非法值不写回数据
+function onCurProviderIdChange(val) {
+  const p = providersData[curModelProviderIdx];
+  if (!p) return;
+  const hint = $('curProviderIdHint');
+  const trimmed = (val || '').trim();
+
+  if (!isValidProviderId(trimmed)) {
+    if (hint) {
+      hint.textContent = 'ID 不能为空，且仅允许字母、数字、下划线、短横线';
+      hint.style.color = 'var(--yorha-accent)';
+    }
+    return;
+  }
+  const conflictIdx = findProviderIdConflict(trimmed, curModelProviderIdx);
+  if (conflictIdx >= 0) {
+    if (hint) {
+      hint.textContent = `该 ID 已被供应商 [ ${providersData[conflictIdx].Name} ] 使用，请更换`;
+      hint.style.color = 'var(--yorha-accent)';
+    }
+    return;
+  }
+
+  p.ID = trimmed;
+  if (hint) {
+    hint.textContent = '模型 ID 在多个供应商间重名时，对外模型名会显示为 [ID/模型ID]；ID 仅允许字母、数字、下划线、短横线，不区分大小写';
+    hint.style.color = '';
+  }
+  if (curModelProviderIdx === 0) updateDefaultProviderLabel();
+  renderModelProvidersList();
+  debouncePersistProviders(600);
 }
 
 function syncAndAutoSaveProviderData() {
@@ -2962,20 +3057,14 @@ async function deleteCurrentModelProvider() {
   const targetName = providersData[curModelProviderIdx].Name;
   if (!confirm(`确认删除供应商 [ ${targetName} ] 吗？`)) return;
 
-  const wasActive = (curModelProviderIdx === activeProviderIndex);
   providersData.splice(curModelProviderIdx, 1);
 
-  if (curModelProviderIdx >= providersData.length) {
-    curModelProviderIdx = providersData.length - 1;
-  }
-  if (wasActive) {
-    activeProviderIndex = 0;
-  } else if (activeProviderIndex > curModelProviderIdx) {
-    activeProviderIndex--;
-  }
+  curModelProviderIdx = Math.max(0, Math.min(curModelProviderIdx, providersData.length - 1));
+  activeProviderIndex = 0; // 删除后第一位可能易主，默认供应商始终跟随列表第一位
+  providersData.forEach(p => { if (!p.ID) p.ID = generateProviderId(p.Name); });
 
-  populateProviderSelect();
   fillProviderEditor();
+  updateDefaultProviderLabel();
   renderModelProvidersList();
   renderCurrentProviderDetail();
 
@@ -3064,12 +3153,37 @@ function renderProviderModelsList() {
 
   if (models.length === 0) {
     if (passthroughBanner) passthroughBanner.style.display = 'flex';
-    if (countBadge) countBadge.textContent = '0 (默认穿透)';
+    if (countBadge) countBadge.textContent = '0 (未配置)';
+
+    // 默认供应商：未配置清单时承担全能透传；其他供应商：未配置清单则不参与路由
+    const isDefaultProvider = (curModelProviderIdx === 0);
+    const bannerTitle = $('passthroughBannerTitle');
+    const bannerText = $('passthroughBannerText');
+    if (isDefaultProvider) {
+      if (bannerTitle) bannerTitle.textContent = '穿透模式激活中（默认供应商）';
+      if (bannerText) {
+        bannerText.textContent = '当前未限制任何模型。未命中路由表的模型请求会原样转发给该供应商，保持全模型兼容。';
+      }
+    } else {
+      if (bannerTitle) bannerTitle.textContent = '未配置模型清单，不参与路由';
+      if (bannerText) {
+        bannerText.textContent = '该供应商未配置模型清单，因此不参与模型清单合并、冲突判定与按模型路由。请先获取上游模型列表或手动添加。';
+      }
+    }
     return;
   }
 
   if (passthroughBanner) passthroughBanner.style.display = 'none';
   if (countBadge) countBadge.textContent = `${models.length} (已限制)`;
+
+  // 顶部汇总条：展示全局模型路由的冲突与遮蔽统计
+  if (routePreview.conflicted > 0 || routePreview.unroutable > 0) {
+    const summary = document.createElement('div');
+    summary.className = 'model-route-summary';
+    summary.innerHTML = `模型路由冲突汇总：<span class="accent-count">冲突 ${routePreview.conflicted} 项</span>` +
+      `<span class="accent-count">无法路由 ${routePreview.unroutable} 项</span>`;
+    container.appendChild(summary);
+  }
 
   const groupsMap = {};
   models.forEach(m => {
@@ -3102,15 +3216,35 @@ function renderProviderModelsList() {
         <span style="font-size: 10px; color: var(--yorha-fg-dim); font-family: monospace;">[ 折叠 / 展开 ]</span>
       </div>
       <div class="model-group-body">
-        ${list.map(m => `
+        ${list.map(m => {
+          const routeInfo = routePreview.byProviderModel[(p.ID || '') + '||' + m.id];
+          const providerEnabled = (curModelProviderIdx === 0) || p.Enabled !== false;
+          let badge = '';
+          if (!providerEnabled) {
+            badge = '<span class="model-route-badge disabled">未启用</span>';
+          } else if (routeInfo && routeInfo.unroutable) {
+            badge = '<span class="model-route-badge unroutable">无法路由</span>';
+          } else if (routeInfo && routeInfo.conflicted) {
+            badge = '<span class="model-route-badge conflicted">已加前缀</span>';
+          }
+          let publicIdHtml;
+          const prefix = (p.ID || '') + '/';
+          if (routeInfo && routeInfo.conflicted && routeInfo.public_id.startsWith(prefix)) {
+            publicIdHtml = `<span class="model-public-id"><span class="route-prefix">${escapeHtml(prefix)}</span>${escapeHtml(routeInfo.public_id.slice(prefix.length))}</span>`;
+          } else {
+            publicIdHtml = `<span class="model-public-id">${escapeHtml((routeInfo && routeInfo.public_id) || m.id)}</span>`;
+          }
+          const ownerLine = `${p.Name || ''} · 上游 ${m.id}`;
+          return `
           <div class="model-item-row">
             <div class="model-item-main">
               <div class="provider-icon-badge" style="width:24px;height:24px;font-size:10px;">
                 ${m.protocol === 'anthropic' ? 'AN' : 'AI'}
               </div>
               <div class="model-item-title-box">
-                <span class="model-item-name">${escapeHtml(m.name || m.id)}</span>
-                <span class="model-item-id">${escapeHtml(m.id)}</span>
+                <span class="model-item-name">${escapeHtml(m.name || m.id)} ${badge}</span>
+                ${publicIdHtml}
+                <span class="model-item-id" style="opacity:0.65;">${escapeHtml(ownerLine)}</span>
               </div>
             </div>
             <div class="model-item-actions">
@@ -3122,7 +3256,8 @@ function renderProviderModelsList() {
               </button>
             </div>
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       </div>
     `;
 
@@ -3139,9 +3274,9 @@ async function removeModelFromProvider(modelId) {
   const p = providersData[curModelProviderIdx];
   if (!p || !p.Models) return;
   p.Models = p.Models.filter(m => m.id !== modelId);
+  await persistProvidersConfig(true);
   renderProviderModelsList();
   renderModelProvidersList();
-  await persistProvidersConfig(true);
   triggerAlert(`已移除模型 [ ${modelId} ]`);
 }
 
@@ -3284,10 +3419,9 @@ async function confirmImportFetchedModels() {
   });
 
   closeFetchModelsModal();
+  await persistProvidersConfig(true);
   renderProviderModelsList();
   renderModelProvidersList();
-
-  await persistProvidersConfig(true);
   triggerAlert(`已导入 ${addedCount} 个模型`);
 }
 
@@ -3374,10 +3508,9 @@ async function confirmAddCustomModel() {
   }
 
   closeCustomModelModal();
+  await persistProvidersConfig(true);
   renderProviderModelsList();
   renderModelProvidersList();
-
-  await persistProvidersConfig(true);
   triggerAlert(`已添加模型 [ ${id} ]`);
 }
 
@@ -3389,6 +3522,13 @@ function openAddProviderModal() {
   $('newProviderName').value = '';
   $('newProviderBaseUrl').value = '';
   $('newProviderApiKey').value = '';
+  const idField = $('newProviderId');
+  if (idField) idField.value = '';
+  const idHint = $('newProviderIdHint');
+  if (idHint) {
+    idHint.textContent = '仅允许字母、数字、下划线、短横线，不区分大小写。模型 ID 在多个供应商间重名时，对外模型名显示为 [ID/模型ID]';
+    idHint.style.color = '';
+  }
   convertSelectsToYorha('#addProviderModal');
   modal.style.display = 'flex';
   requestAnimationFrame(() => modal.classList.add('open'));
@@ -3411,7 +3551,10 @@ function applyProviderPreset(preset) {
     custom: { name: '', base: '' }
   };
   const cfg = presets[preset] || presets.custom;
-  if (cfg.name) $('newProviderName').value = cfg.name;
+  if (cfg.name) {
+    $('newProviderName').value = cfg.name;
+    onNewProviderNameInput(); // 选中预设后同步自动填充 ID
+  }
   if (cfg.base) $('newProviderBaseUrl').value = cfg.base;
 }
 
@@ -3419,14 +3562,29 @@ async function confirmAddNewProvider() {
   const name = ($('newProviderName').value || '').trim();
   const base = ($('newProviderBaseUrl').value || '').trim();
   const key = ($('newProviderApiKey').value || '').trim();
+  const idRaw = ($('newProviderId').value || '').trim();
 
   if (!name) {
     triggerAlert('请输入供应商名称');
     return;
   }
+  if (!idRaw) {
+    triggerAlert('请填写供应商 ID：英文名称会自动填充，非英文名称需手动指定');
+    return;
+  }
+  if (!isValidProviderId(idRaw)) {
+    triggerAlert('供应商 ID 仅允许字母、数字、下划线、短横线');
+    return;
+  }
+  if (findProviderIdConflict(idRaw, -1) >= 0) {
+    triggerAlert(`供应商 ID [ ${idRaw} ] 已被占用，请更换`);
+    return;
+  }
 
   const newP = {
+    ID: idRaw,
     Name: name,
+    Enabled: true,
     BaseURL: base || 'https://api.example.com',
     AnthropicBaseURL: '',
     APIKey: key,
@@ -3437,13 +3595,46 @@ async function confirmAddNewProvider() {
   curModelProviderIdx = providersData.length - 1;
 
   closeAddProviderModal();
-  populateProviderSelect();
   fillProviderEditor();
+  updateDefaultProviderLabel();
   renderModelProvidersList();
   renderCurrentProviderDetail();
 
   await persistProvidersConfig(true);
   triggerAlert(`供应商 [ ${name} ] 已添加`);
+}
+
+// 名称输入：名称为合法英文（字母/数字/下划线/短横线）时自动填充同名 ID，用户可自行修改
+function onNewProviderNameInput() {
+  const name = ($('newProviderName').value || '').trim();
+  const idInput = $('newProviderId');
+  if (!idInput) return;
+  idInput.value = isValidProviderId(name) ? name : '';
+  onNewProviderIdInput();
+}
+
+function onNewProviderIdInput() {
+  const idRaw = ($('newProviderId').value || '').trim();
+  const hint = $('newProviderIdHint');
+  if (!hint) return;
+  if (!idRaw) {
+    hint.textContent = 'ID 不能为空：英文名称会自动填充，非英文名称请手动填写';
+    hint.style.color = 'var(--yorha-accent)';
+    return;
+  }
+  if (!isValidProviderId(idRaw)) {
+    hint.textContent = 'ID 仅允许字母、数字、下划线、短横线';
+    hint.style.color = 'var(--yorha-accent)';
+    return;
+  }
+  const conflictIdx = findProviderIdConflict(idRaw, -1);
+  if (conflictIdx >= 0) {
+    hint.textContent = `该 ID 已被供应商 [ ${providersData[conflictIdx].Name} ] 使用，请更换`;
+    hint.style.color = 'var(--yorha-accent)';
+    return;
+  }
+  hint.textContent = '模型 ID 在多个供应商间重名时，对外模型名显示为 [ID/模型ID]';
+  hint.style.color = '';
 }
 
 // ── 模态弹窗 4: 最小通用 LLM 可用性测试控制台 ──

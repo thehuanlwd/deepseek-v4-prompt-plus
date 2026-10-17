@@ -58,7 +58,7 @@ go test -v -run TestTransformOpenAIInPlace ./...  # 单个测试
 ### 请求处理流程
 
 ```
-客户端请求 → 格式检测 → System Prompt 重组 → 参数注入 → 转发 DeepSeek API
+客户端请求 → 格式检测 → 按模型路由（选定供应商 + 还原上游真实模型名）→ System Prompt 重组 → 参数注入 → 转发上游 API
                  ↓
            防循环引擎（可选）→ 检测到死循环 → 子Agent分析 → 重试
 ```
@@ -67,7 +67,8 @@ go test -v -run TestTransformOpenAIInPlace ./...  # 单个测试
 
 | 文件 | 职责 | 关键函数 |
 |------|------|---------|
-| `config.go` | 配置管理（JSON 持久化） | `LoadConfig()`, `SaveConfig()`, `SafeConfig` |
+| `config.go` | 配置管理（JSON 持久化）、供应商字段与迁移规范化 | `LoadConfig()`, `SaveConfig()`, `SafeConfig`, `normalizeProviders()` |
+| `route.go` | 全局模型路由表：模型名 → 供应商 + 上游真实模型名 | `buildRouteTable()`, `RouteTable.Resolve()`, `ListModels()` |
 | `transform.go` | System Prompt 重组（OpenAI + Anthropic） | `transformOpenAIInPlace()`, `transformAnthropicInPlace()` |
 | `proxy.go` | HTTP 代理核心 + 防循环流引擎 | `forwardStreamWithAntiLoop()`, `injectThinkingParams()` |
 | `retry.go` | 防循环：子Agent分析、并行检测、重试 | `callAntiLoopAnalyzerWith()`, `parallelAnalyze()` |
@@ -90,6 +91,7 @@ go test -v -run TestTransformOpenAIInPlace ./...  # 单个测试
 5. **自包含哈希去重日志**：`AnalysisService` 对大段 system prompt 计算 MD5，同天内仅首发写入明文，后续使用哈希引用，并在读盘时自包含还原，解决无损存储与磁盘体积的矛盾。
 6. **物理行为与系统干预分离**：日志的 `SemanticType` 只代表真实的 API 物理网络交互行为，而防循环重试、防幻觉、思考完成等辅助控制事件由 `RequestType` 和 `SystemEvent` 承载，并在最后一列表头独立渲染，请求端点如实展现原本路径，行为与标记彻底解耦。
 7. **局部增量更新流**：前端 Token 数据高频更新时改用防御性增量更新，绝不重写 `innerHTML`，以避免鼠标 Hover 闪烁并保证整行动作交互（如点击抽屉）的高灵敏传递。
+8. **多供应商按模型路由**：`providers` 数组顺序即优先级，第一位为默认供应商（路由未命中的兜底目标）；跨供应商重名的模型 ID 对外统一加前缀 `供应商ID/模型ID`，请求命中后剥离前缀还原上游真实模型名；未命中则原样透传给默认供应商。路由表为纯函数 `buildRouteTable()`，每次请求现算，配置变更即时生效。规则细节见 `docs/开发必读/2026-10-07-multi-provider-model-routing-design.md`。
 
 ### API 端点
 
@@ -101,6 +103,7 @@ go test -v -run TestTransformOpenAIInPlace ./...  # 单个测试
 | `/api/status` | 服务状态 JSON |
 | `/api/logs` | 请求日志列表 |
 | `/api/config` | 获取/更新配置 |
+| `/api/route/preview` | 模型路由表预览（对外模型名、冲突与遮蔽状态） |
 | `/api/analysis/status` | 获取分析服务运行状态 |
 | `/api/analysis/sessions` | 获取分析会话列表 |
 | `/api/analysis/sessions/{id}` | 获取特定会话详情 |
@@ -111,7 +114,9 @@ go test -v -run TestTransformOpenAIInPlace ./...  # 单个测试
 
 配置文件 `config.json` 自动生成在 `DSPlus.exe` 同目录，关键字段：
 
-- `api_key`: DeepSeek API Key（必填）
+- `api_key`: 全局兜底 API Key
+- `providers`: 供应商列表，数组顺序即优先级；每项含 `id`（模型重名时的对外前缀，字符白名单 `[A-Za-z0-9_-]`）、`name`、`enabled`（缺省为启用，第一位强制启用）、`base_url`、`anthropic_base_url`、`api_key`（加密）、`models`（为空时不参与路由表，作为默认供应商时承担全能透传）
+- `active_provider`: 兼容字段，仅与列表第一位同步，不再作为路由依据
 - `port`: 监听端口（默认 8188）
 - `system_prompt_placement`: 拼接位置（`first`/`last`/`none`）
 - `thinking_mode`: 思考模式（`enabled`/`disabled`/空）

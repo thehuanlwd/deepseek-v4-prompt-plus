@@ -40,6 +40,8 @@ func TestDetectFormat_Anthropic(t *testing.T) {
 }
 
 func TestDetectFormat_Unknown(t *testing.T) {
+	// 地址未命中任何已知协议路径时，请求体不合法应判定为无法识别。
+	// 注意：不能用 /v1/chat/completions 等已知协议路径，那里路径优先、不看请求体（见下一个用例）。
 	tests := []string{
 		``,
 		`not json`,
@@ -47,8 +49,21 @@ func TestDetectFormat_Unknown(t *testing.T) {
 		`{"messages":"not an array"}`,
 	}
 	for _, body := range tests {
-		if got := detectFormat("/v1/chat/completions", body); got != "unknown" {
+		if got := detectFormat("/v1/custom", body); got != "unknown" {
 			t.Errorf("detectFormat(%q) = %q, want unknown", body, got)
+		}
+	}
+}
+
+func TestDetectFormat_PathTakesPrecedence(t *testing.T) {
+	// 地址已明确协议时，即使请求体不合法或缺失结构，也按该协议处理：
+	// 否则客户端发出的非标准请求体会让协议判定翻转，走进完全不同的转换分支。
+	for _, body := range []string{"", "not json", `{"no_messages":true}`} {
+		if got := detectFormat("/v1/chat/completions", body); got != "openai" {
+			t.Errorf("detectFormat(%q) = %q, want openai", body, got)
+		}
+		if got := detectFormat("/v1/messages", body); got != "anthropic" {
+			t.Errorf("detectFormat(%q) = %q, want anthropic", body, got)
 		}
 	}
 }
@@ -641,6 +656,82 @@ func TestIsDeepSeekModel_ThirdPartyGatewayWithDeepSeekModel(t *testing.T) {
 	}
 }
 
+// ── injectReasoningContent ──────────────────────────────────────────────────
+
+// 非 DeepSeek 通道：开关打开也不得向历史消息补 reasoning_content 空字段，请求保持原样透传。
+func TestInjectReasoningContent_NonDeepSeekPassthrough(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{AutoReasoningContent: true})}
+	prov := Provider{Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1"}
+	data := map[string]interface{}{
+		"model": "openai/gpt-5",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":       "assistant",
+				"content":    "",
+				"tool_calls": []interface{}{map[string]interface{}{"id": "call_1"}},
+			},
+		},
+	}
+	ps.injectReasoningContentFor(data, "openai", prov)
+	if _, ok := data["messages"].([]interface{})[0].(map[string]interface{})["reasoning_content"]; ok {
+		t.Error("非 DeepSeek 通道不应注入 reasoning_content")
+	}
+}
+
+// DeepSeek 通道：带 tool_calls 的 assistant 消息缺失该字段时补空串；非 assistant 不注入，已有值不覆盖。
+func TestInjectReasoningContent_DeepSeekBackfill(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{AutoReasoningContent: true})}
+	prov := Provider{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}
+	data := map[string]interface{}{
+		"model": "deepseek-reasoner",
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "hi"},
+			map[string]interface{}{
+				"role":       "assistant",
+				"content":    "",
+				"tool_calls": []interface{}{map[string]interface{}{"id": "call_1"}},
+			},
+			map[string]interface{}{
+				"role":              "assistant",
+				"content":           "",
+				"tool_calls":        []interface{}{map[string]interface{}{"id": "call_2"}},
+				"reasoning_content": "已有思考",
+			},
+		},
+	}
+	ps.injectReasoningContentFor(data, "openai", prov)
+	msgs := data["messages"].([]interface{})
+	if _, ok := msgs[0].(map[string]interface{})["reasoning_content"]; ok {
+		t.Error("user 消息不应被注入")
+	}
+	if v, ok := msgs[1].(map[string]interface{})["reasoning_content"]; !ok || v != "" {
+		t.Errorf("DeepSeek 通道的 assistant 工具调用消息应补空串，got %v (exists=%v)", v, ok)
+	}
+	if v := msgs[2].(map[string]interface{})["reasoning_content"]; v != "已有思考" {
+		t.Errorf("已有 reasoning_content 不应被覆盖，got %v", v)
+	}
+}
+
+// 开关关闭时：DeepSeek 通道同样不注入。
+func TestInjectReasoningContent_SwitchOff(t *testing.T) {
+	ps := &ProxyServer{config: NewSafeConfig(Config{AutoReasoningContent: false})}
+	prov := Provider{Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"}
+	data := map[string]interface{}{
+		"model": "deepseek-chat",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role":       "assistant",
+				"content":    "",
+				"tool_calls": []interface{}{},
+			},
+		},
+	}
+	ps.injectReasoningContentFor(data, "openai", prov)
+	if _, ok := data["messages"].([]interface{})[0].(map[string]interface{})["reasoning_content"]; ok {
+		t.Error("开关关闭时不应注入")
+	}
+}
+
 func TestIsDeepSeekHost(t *testing.T) {
 	cases := map[string]bool{
 		"api.deepseek.com":     true,
@@ -813,7 +904,7 @@ func TestApplyRetryThinking_DeepSeekMapping(t *testing.T) {
 		AntiLoopRetryEffort:   "medium",
 	})}
 	data := map[string]interface{}{"model": "deepseek-chat"}
-	ps.applyRetryThinking(data, "openai", nil)
+	ps.applyRetryThinking(data, "openai", nil, Provider{})
 	if data["reasoning_effort"] != "high" {
 		t.Errorf("DeepSeek 重试 medium 应收敛为 high, got %v", data["reasoning_effort"])
 	}
@@ -827,7 +918,7 @@ func TestApplyRetryThinking_DeepSeekMapping(t *testing.T) {
 		AntiLoopRetryEffort:   "medium",
 	})}
 	data2 := map[string]interface{}{"model": "gpt-5"}
-	ps2.applyRetryThinking(data2, "openai", nil)
+	ps2.applyRetryThinking(data2, "openai", nil, Provider{})
 	if data2["reasoning_effort"] != "medium" {
 		t.Errorf("非 DeepSeek 重试 medium 应保持 medium, got %v", data2["reasoning_effort"])
 	}
@@ -839,7 +930,7 @@ func TestApplyRetryThinking_AnthropicDeepSeekMapping(t *testing.T) {
 		AntiLoopRetryEffort:   "xhigh",
 	})}
 	data := map[string]interface{}{"model": "deepseek-chat"}
-	ps.applyRetryThinking(data, "anthropic", nil)
+	ps.applyRetryThinking(data, "anthropic", nil, Provider{})
 	if oc, _ := data["output_config"].(map[string]interface{}); oc == nil || oc["effort"] != "high" {
 		t.Errorf("Anthropic 重试 DeepSeek xhigh 应收敛为 high, got %v", data["output_config"])
 	}
@@ -850,9 +941,35 @@ func TestApplyRetryThinking_AnthropicDeepSeekMapping(t *testing.T) {
 		AntiLoopRetryEffort:   "xhigh",
 	})}
 	data2 := map[string]interface{}{"model": "claude-sonnet-4"}
-	ps2.applyRetryThinking(data2, "anthropic", nil)
+	ps2.applyRetryThinking(data2, "anthropic", nil, Provider{})
 	if oc2, _ := data2["output_config"].(map[string]interface{}); oc2 == nil || oc2["effort"] != "xhigh" {
 		t.Errorf("非 DeepSeek Anthropic 重试 xhigh 应保持 xhigh, got %v", data2["output_config"])
+	}
+}
+
+// TestApplyRetryThinking_ByProviderUpstream 覆盖多供应商场景：
+// 重试档位是否收敛不再只看重试模型名，还要看本次请求实际命中的供应商上游。
+func TestApplyRetryThinking_ByProviderUpstream(t *testing.T) {
+	// 重试模型名不含 deepseek，但命中供应商的上游是 DeepSeek 官方：同样收敛到官方档位。
+	ps := &ProxyServer{config: NewSafeConfig(Config{
+		AntiLoopRetryThinking: "enabled",
+		AntiLoopRetryEffort:   "medium",
+	})}
+	data := map[string]interface{}{"model": "v4-flash"}
+	ps.applyRetryThinking(data, "openai", nil, Provider{BaseURL: "https://api.deepseek.com"})
+	if data["reasoning_effort"] != "high" {
+		t.Errorf("命中 DeepSeek 上游时 medium 应收敛为 high, got %v", data["reasoning_effort"])
+	}
+
+	// 命中第三方上游且模型名不含 deepseek：档位保持原样。
+	ps2 := &ProxyServer{config: NewSafeConfig(Config{
+		AntiLoopRetryThinking: "enabled",
+		AntiLoopRetryEffort:   "medium",
+	})}
+	data2 := map[string]interface{}{"model": "v4-flash"}
+	ps2.applyRetryThinking(data2, "openai", nil, Provider{BaseURL: "https://openrouter.ai/api/v1"})
+	if data2["reasoning_effort"] != "medium" {
+		t.Errorf("第三方上游 medium 应保持 medium, got %v", data2["reasoning_effort"])
 	}
 }
 
@@ -883,14 +1000,25 @@ func TestTruncateBody(t *testing.T) {
 	if truncateBody(short) != short {
 		t.Error("short string should not be truncated")
 	}
+
+	// 超长内容采用「保头尾、省略中段」策略：请求头含模型与参数、尾部是最新一轮消息，
+	// 两端都保留对分析更有价值；被丢弃的中间部分替换为带字节数的省略标记。
 	long := strings.Repeat("x", truncateBodyMaxLen+100)
 	result := truncateBody(long)
-	expectedMax := truncateBodyMaxLen + len("\n\n... [truncated]")
-	if len(result) > expectedMax {
-		t.Errorf("len=%d, want <= %d", len(result), expectedMax)
+	marker := "\n\n... [中间已省略 100 字节] ...\n\n"
+
+	if want := truncateBodyMaxLen + len(marker); len(result) != want {
+		t.Errorf("len=%d, want %d", len(result), want)
 	}
-	if !strings.Contains(result, "[truncated]") {
-		t.Error("truncated string should have marker")
+	if !strings.Contains(result, marker) {
+		t.Errorf("应以中段省略标记替代被丢弃的内容, got %q", result[truncateBodyMaxLen/2:])
+	}
+	// 头部与尾部内容都必须原样保留。
+	if !strings.HasPrefix(result, strings.Repeat("x", 64)) {
+		t.Error("头部内容应保留")
+	}
+	if !strings.HasSuffix(result, strings.Repeat("x", 64)) {
+		t.Error("尾部内容应保留")
 	}
 }
 

@@ -42,6 +42,7 @@ type LogEntry struct {
 	ID               int64             `json:"id"`
 	Time             time.Time         `json:"time"`
 	Format           string            `json:"format"`
+	Provider         string            `json:"provider,omitempty"`      // 本次请求实际命中的供应商名称（多供应商路由）
 	RequestType      string            `json:"request_type,omitempty"`  // "" = proxy, "antiloop_analyzer", "antiloop_retry"
 	Method           string            `json:"method"`
 	Path             string            `json:"path"`

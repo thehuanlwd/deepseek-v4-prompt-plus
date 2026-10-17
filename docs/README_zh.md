@@ -489,7 +489,9 @@ DSPlus.exe --port=9999
 
 #### 2. 配置 DeepSeek API Key
 
-打开 GUI，进入“系统设置”，在供应商列表中填写 API Key（默认已内置 DeepSeek 供应商，也可新增其它兼容供应商并切换）。
+打开 GUI，进入“模型服务”页，在左侧供应商列表中选中供应商并填写 API Key（默认已内置 DeepSeek 供应商，也可新增其它兼容供应商）。
+
+多个供应商可同时生效：每个供应商有独立的「启用」开关，开着的供应商之间按模型名自动分流；列表第一位是默认供应商，未命中任何模型清单的请求会原样透传给它，拖拽列表即可调整顺序。
 
 API Key 在本地 `config.json` 中以加密形式保存（写入前经 AES-GCM 加密，旧版明文会在下次保存时自动升级）。
 
@@ -545,8 +547,8 @@ config.json
 | 字段 | 说明 |
 |---|---|
 | `api_key` | 全局兜底 API Key，本地加密保存（写入 `config.json` 前经 AES-GCM 加密，带 `ENC:` 前缀） |
-| `providers` | 上游供应商列表；每项含 `name` / `base_url` / `anthropic_base_url`（可选）/ `api_key`（加密），支持配置多个供应商 |
-| `active_provider` | 当前启用的供应商名称（对应 `providers[].name`） |
+| `providers` | 上游供应商列表，数组顺序即优先级；每项含 `id`（供应商唯一标识，模型重名时作为对外前缀）/ `name` / `enabled`（是否参与路由，缺省为启用，第一位强制启用）/ `base_url` / `anthropic_base_url`（可选）/ `api_key`（加密）/ `models`（模型清单，为空时不参与路由表，作为默认供应商时承担全能透传） |
+| `active_provider` | 兼容字段，仅与列表第一位名称同步；默认供应商由 `providers` 数组顺序决定，不再作为路由依据 |
 | `port` | 本地监听端口，默认 8188 |
 | `lan_access` | 是否允许局域网 / WSL 访问 |
 | `openai_upstream` | OpenAI 风格上游地址 |

@@ -45,6 +45,8 @@ type ProxyContext struct {
 	StartTime       time.Time
 	Format          string
 	Route           string
+	Upstream        string   // 本次请求实际使用的上游基础地址（按模型路由解析得到）
+	Provider        Provider // 本次请求命中的供应商
 	OriginalBody    string
 	TransformedBody []byte
 	Transformed     bool
@@ -114,30 +116,37 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
-	// 拦截客户端获取模型列表请求：若当前供应商配置了自定义/指定模型，直接返回本地模型清单；为空时继续穿透至上游
+	cfg := s.config.Get()
+	routeTable := buildRouteTable(cfg)
+
+	// 拦截客户端获取模型列表请求：合并返回所有启用供应商的模型清单（跨供应商重名的模型带供应商前缀）；
+	// 路由表中没有任何模型时继续穿透至上游，保持原有透传行为。
 	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
 	if r.Method == "GET" && (cleanPath == "/v1/models" || cleanPath == "/models") {
-		if p, ok := s.activeProvider(); ok && len(p.Models) > 0 {
-			type modelItem struct {
-				ID      string `json:"id"`
-				Object  string `json:"object"`
-				Created int64  `json:"created"`
-				OwnedBy string `json:"owned_by"`
+		type modelItem struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
+		}
+		var list []modelItem
+		now := time.Now().Unix()
+		for _, e := range routeTable.ListModels() {
+			if e.Unroutable {
+				continue // 加前缀后仍与他人重名、被遮蔽的模型不对外暴露
 			}
-			var list []modelItem
-			now := time.Now().Unix()
-			for _, m := range p.Models {
-				ownedBy := m.Group
-				if ownedBy == "" {
-					ownedBy = p.Name
-				}
-				list = append(list, modelItem{
-					ID:      m.ID,
-					Object:  "model",
-					Created: now,
-					OwnedBy: ownedBy,
-				})
+			ownedBy := e.Group
+			if ownedBy == "" {
+				ownedBy = e.ProviderName
 			}
+			list = append(list, modelItem{
+				ID:      e.PublicModelID,
+				Object:  "model",
+				Created: now,
+				OwnedBy: ownedBy,
+			})
+		}
+		if len(list) > 0 {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.WriteHeader(http.StatusOK)
@@ -150,7 +159,6 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startTime := time.Now()
-	cfg := s.config.Get()
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -162,7 +170,6 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	originalBody := string(body)
 
 	format := detectFormat(r.URL.Path, originalBody)
-	upstream := s.selectUpstream(format)
 
 	var transformed bool
 	var hasSystemPrompt bool
@@ -174,6 +181,19 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(body, &data) != nil {
 		// Not valid JSON — pass through as-is
 		data = nil
+	}
+
+	// 按模型名路由：定位目标供应商，并把请求体中的模型名还原为上游真实模型名（剥离 "供应商ID/" 前缀）。
+	// 未命中路由表时回退默认供应商（列表第一位）并原样透传模型名。
+	routeEntry, provider, _ := routeTable.Resolve(detectModel(originalBody))
+	if data != nil && routeEntry.UpstreamModelID != "" {
+		if _, ok := data["model"].(string); ok {
+			data["model"] = routeEntry.UpstreamModelID
+		}
+	}
+	upstream := s.resolveBaseURL(provider, format)
+	if upstream == "" {
+		upstream = s.legacyUpstream(format)
 	}
 
 	// 在转换之前检测语义类型（转换会修改 data 中的 messages）
@@ -197,12 +217,15 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Apply thinking / max_tokens injections on the already-parsed map.
 	if data != nil && (format == "openai" || format == "anthropic") {
-		s.injectThinkingParams(data, format)
+		// 档位归一化按本次命中的供应商判定是否为 DeepSeek 通道，避免多供应商下误收敛
+		s.injectThinkingParamsFor(data, format, provider)
 		s.injectMaxTokens(data)
 	}
 
-	if data != nil && cfg.AutoReasoningContent {
-		injectReasoningContent(data)
+	// reasoning_content 补全是 DeepSeek 官方接口的格式要求（assistant 带 tool_calls 时必须携带该字段）。
+	// 非 DeepSeek 通道无此要求，注入专有字段可能被严格校验的上游判为非法参数，故仅对 DeepSeek 生效，其余厂商原样透传。
+	if data != nil {
+		s.injectReasoningContentFor(data, format, provider)
 	}
 
 	if data != nil && cfg.AutoFixEmptyContent {
@@ -235,7 +258,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	copyHeaders(proxyReq.Header, r.Header)
-	key := s.activeAPIKey()
+	key := s.providerAPIKey(provider)
 	proxyReq.Header.Set("Authorization", "Bearer "+key)
 	if format == "anthropic" {
 		// Anthropic 协议（含 DeepSeek / opencode.ai 的 Anthropic 兼容端点）用 x-api-key 认证。
@@ -256,6 +279,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	logID := s.logger.Add(LogEntry{
 		Time:            startTime,
 		Format:          format,
+		Provider:        provider.Name,
 		Method:          r.Method,
 		Path:            r.URL.Path,
 		StatusCode:      0,
@@ -321,6 +345,8 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 		Format:          format,
 		Route:           r.URL.Path,
+		Upstream:        upstream,
+		Provider:        provider,
 		OriginalBody:    originalBody,
 		TransformedBody: transformedBody,
 		Transformed:     transformed,
@@ -355,7 +381,7 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		fr := detectBufferFinishReason(bodyBytes)
 		if fr == "length" || fr == "max_tokens" {
 			log.Printf("[antiloop] non-stream finish_reason=%s, triggering retry", fr)
-			bodyBytes = s.handleAntiLoop(transformedBody, format, "")
+			bodyBytes = s.handleAntiLoop(transformedBody, format, "", provider)
 			fr = detectBufferFinishReason(bodyBytes)
 		}
 
@@ -442,23 +468,29 @@ var deepSeekEffortAliases = map[string]string{
 	"ultra":   "max",
 }
 
-// isDeepSeekModel 判断当前请求是否指向 DeepSeek 系列模型，用于决定是否启用上面的收敛表。
+// isDeepSeekModel 判断当前请求是否指向 DeepSeek 系列模型，按默认供应商（列表第一位）的上游地址判定。
+// 供未显式指定供应商的调用方（含单元测试）使用；请求处理链路请使用 isDeepSeekModelFor。
+func (s *ProxyServer) isDeepSeekModel(data map[string]interface{}, format string) bool {
+	p, _ := s.defaultProvider()
+	return s.isDeepSeekModelFor(data, format, p)
+}
+
+// isDeepSeekModelFor 判断当前请求是否指向 DeepSeek 系列模型，用于决定是否启用上面的收敛表。
 // 判据一：请求体 model 字段包含 "deepseek"（覆盖 deepseek-chat、deepseek-reasoner，
 // 以及 cline-pass/deepseek-v4.1-flash 这类带网关前缀的写法）。此判据与厂商无关：
 // 即使经 OpenRouter / Cline 等第三方网关，只要模型属于 DeepSeek 系列就收敛；
 // 反之，网关上的模型别名若不含 "deepseek"，则不会被识别。
-// 判据二：本次请求实际命中的上游主机属于 *.deepseek.com。
+// 判据二：本次请求实际命中的供应商上游主机属于 *.deepseek.com。
 // 注意按 format 解析真实地址：Anthropic 格式优先取 AnthropicBaseURL，
 // 因此不能用 BaseURL 一概而论，否则会漏判或误判。
 // 两者均不满足即视为非 DeepSeek，档位保持原样，不受本表影响。
-func (s *ProxyServer) isDeepSeekModel(data map[string]interface{}, format string) bool {
+func (s *ProxyServer) isDeepSeekModelFor(data map[string]interface{}, format string, p Provider) bool {
 	if model, ok := data["model"].(string); ok {
 		if strings.Contains(strings.ToLower(model), "deepseek") {
 			return true
 		}
 	}
-	p, ok := s.activeProvider()
-	if !ok {
+	if p.BaseURL == "" && p.AnthropicBaseURL == "" {
 		return false
 	}
 	return isDeepSeekHost(upstreamHostname(s.resolveBaseURL(p, format)))
@@ -538,11 +570,19 @@ func normalizeClientEffortFields(data map[string]interface{}, norm func(string) 
 	}
 }
 
+// injectThinkingParams 按默认供应商（列表第一位）判定通道类型后注入思考参数。
+// 供未显式指定供应商的调用方（含单元测试）使用；请求处理链路请使用 injectThinkingParamsFor。
 func (s *ProxyServer) injectThinkingParams(data map[string]interface{}, format string) {
+	p, _ := s.defaultProvider()
+	s.injectThinkingParamsFor(data, format, p)
+}
+
+// injectThinkingParamsFor 按本次请求命中的供应商注入思考参数。
+func (s *ProxyServer) injectThinkingParamsFor(data map[string]interface{}, format string, provider Provider) {
 	cfg := s.config.Get()
 	mode := cfg.ThinkingMode
 	// DeepSeek 系列按官方档位收敛；其他厂商保持既有归一化策略不变。
-	deepSeek := s.isDeepSeekModel(data, format)
+	deepSeek := s.isDeepSeekModelFor(data, format, provider)
 	norm := func(effort string) string { return sanitizeReasoningEffortFor(effort, deepSeek) }
 	if mode == "" {
 		// 客户端未被服务端强制覆盖时，对客户端自带档位做同样的归一化：
@@ -704,7 +744,16 @@ func messagesContainTag(data map[string]interface{}, tag string) bool {
 	return false
 }
 
-func injectReasoningContent(data map[string]interface{}) {
+// injectReasoningContentFor 仅在 DeepSeek 通道上补全历史消息缺失的 reasoning_content 空字段，
+// 对齐 DeepSeek 官方接口要求（assistant 消息带 tool_calls 时必须包含该字段）。
+// 非 DeepSeek 厂商没有此要求，保持请求体原样透传，避免注入专有字段导致上游报 400。
+func (s *ProxyServer) injectReasoningContentFor(data map[string]interface{}, format string, prov Provider) {
+	if !s.config.Get().AutoReasoningContent {
+		return
+	}
+	if !s.isDeepSeekModelFor(data, format, prov) {
+		return
+	}
 	messages, ok := data["messages"].([]interface{})
 	if !ok {
 		return
@@ -963,7 +1012,7 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 			ctx.Response.StatusCode,
 			time.Since(ctx.StartTime).Milliseconds(),
 			detectModel(ctx.OriginalBody),
-			s.selectUpstream(ctx.Format),
+			s.ctxUpstream(ctx),
 			buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 			ResponseMeta{
 				FinishReason:      "stop",
@@ -998,7 +1047,7 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 			200,
 			0,
 			detectModel(ctx.OriginalBody),
-			s.selectUpstream(ctx.Format),
+			s.ctxUpstream(ctx),
 			buildRequestMeta(secondReq, ctx.Format, true, false, finalAction),
 			ResponseMeta{
 				FinishReason:     retryFR,
@@ -1062,7 +1111,7 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 		ctx.Response.StatusCode,
 		time.Since(ctx.StartTime).Milliseconds(),
 		detectModel(ctx.OriginalBody),
-		s.selectUpstream(ctx.Format),
+		s.ctxUpstream(ctx),
 		buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 		ResponseMeta{
 			FinishReason:     finishReason,
@@ -1125,7 +1174,7 @@ func (s *ProxyServer) forwardBuffered(ctx *ProxyContext) {
 		ctx.Response.StatusCode,
 		time.Since(ctx.StartTime).Milliseconds(),
 		detectModel(ctx.OriginalBody),
-		s.selectUpstream(ctx.Format),
+		s.ctxUpstream(ctx),
 		buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 		ResponseMeta{
 			FinishReason:     fr,
@@ -1331,7 +1380,7 @@ func (s *ProxyServer) streamAndMonitorPhase1(ctx *ProxyContext, state *antiLoopS
 
 			analyzeTriggered = true
 			analyzeDone = make(chan analyzeResult, 1)
-			go s.parallelAnalyze(analyzeDone, ctx.TransformedBody, ctx.Format, state.reasoningBuilder.String(), state.contentBuilder.String())
+			go s.parallelAnalyze(analyzeDone, ctx.TransformedBody, ctx.Format, state.reasoningBuilder.String(), state.contentBuilder.String(), ctx.Provider)
 			log.Printf("[antiloop] parallel analysis triggered at %d tokens", effectiveTokens)
 			traceKeyvals("event", "analyzer_launch", "eff", effectiveTokens, "usage", completionTokens, "est", estimatedTokens)
 		}
@@ -1367,7 +1416,7 @@ func (s *ProxyServer) streamAndMonitorPhase1(ctx *ProxyContext, state *antiLoopS
 						200,
 						0,
 						"deepseek-chat",
-						s.activeBaseURL(),
+						s.resolveBaseURL(ctx.Provider, "openai"),
 						buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 						ResponseMeta{
 							AnalyzerJudgment: result.analysis.Judgment,
@@ -1592,7 +1641,7 @@ func (s *ProxyServer) executeRetryPhase2(ctx *ProxyContext, state *antiLoopState
 			ctx.Response.StatusCode,
 			time.Since(ctx.StartTime).Milliseconds(),
 			detectModel(ctx.OriginalBody),
-			s.selectUpstream(ctx.Format),
+			s.ctxUpstream(ctx),
 			buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 			ResponseMeta{
 				FinishReason:      "stop",
@@ -1626,7 +1675,7 @@ func (s *ProxyServer) executeRetryPhase2(ctx *ProxyContext, state *antiLoopState
 			200,
 			0,
 			detectModel(ctx.OriginalBody),
-			s.selectUpstream(ctx.Format),
+			s.ctxUpstream(ctx),
 			buildRequestMeta(secondReq, ctx.Format, true, false, finalAction),
 			ResponseMeta{
 				FinishReason:     retryFR,
@@ -1741,20 +1790,20 @@ func (s *ProxyServer) executeRetryPhase2(ctx *ProxyContext, state *antiLoopState
 
 	if state.earlyStop && state.earlyStopAnalysis != nil {
 		log.Printf("[antiloop] reqID=%d building early-stop retry (judgment=%s)", state.reqID, state.earlyStopAnalysis.Judgment)
-		state.retryBody = s.buildGuidedRetryRequest(ctx.TransformedBody, ctx.Format, state.earlyStopAnalysis, phase1Content, reasoningContent, true)
+		state.retryBody = s.buildGuidedRetryRequest(ctx.TransformedBody, ctx.Format, state.earlyStopAnalysis, phase1Content, reasoningContent, true, ctx.Provider)
 	} else if state.finishReason == "length" {
 		log.Printf("[antiloop] reqID=%d building length-fallback retry (reasoning=%d bytes, content=%d bytes)", state.reqID, len(reasoningContent), len(phase1Content))
 		var analyzeErr error
-		state.retryBody, analyzeErr = s.runAntiLoopAnalysis(ctx.TransformedBody, ctx.Format, phase1Content, reasoningContent)
+		state.retryBody, analyzeErr = s.runAntiLoopAnalysis(ctx.TransformedBody, ctx.Format, phase1Content, reasoningContent, ctx.Provider)
 		if analyzeErr != nil {
 			log.Printf("[antiloop] reqID=%d analyzer failed: %v, using simple retry", state.reqID, analyzeErr)
-			state.retryBody = s.buildSimpleRetryRequest(ctx.TransformedBody, ctx.Format, phase1Content, reasoningContent)
+			state.retryBody = s.buildSimpleRetryRequest(ctx.TransformedBody, ctx.Format, phase1Content, reasoningContent, ctx.Provider)
 		}
 	}
 
 	log.Printf("[antiloop] reqID=%d Phase 2: executing retry request (body_bytes=%d)", state.reqID, len(state.retryBody))
 	traceKeyvals("event", "retry_start", "req_id", state.reqID, "body_bytes", len(state.retryBody), "early_stop", state.earlyStop)
-	retryFR, retryUsage := s.executeAndStreamRetry(ctx.ResponseWriter, state.flusher, state.canFlush, state.retryBody, ctx.Format, state.capture, state.streamID)
+	retryFR, retryUsage := s.executeAndStreamRetry(ctx.ResponseWriter, state.flusher, state.canFlush, state.retryBody, ctx.Format, state.capture, state.streamID, ctx.Provider)
 	log.Printf("[antiloop] reqID=%d Phase 2 end: retry finish_reason=%s retry_usage=%v", state.reqID, retryFR, retryUsage != nil)
 	traceKeyvals("event", "retry_end", "req_id", state.reqID, "finish_reason", retryFR, "has_usage", retryUsage != nil)
 
@@ -1783,7 +1832,7 @@ func (s *ProxyServer) executeRetryPhase2(ctx *ProxyContext, state *antiLoopState
 		200,
 		0,
 		cfg.AntiLoopRetryModel,
-		s.selectUpstream(ctx.Format),
+		s.ctxUpstream(ctx),
 		buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 		ResponseMeta{
 			FinishReason:     retryFR,
@@ -1854,7 +1903,7 @@ func (s *ProxyServer) finalizeStream(ctx *ProxyContext, state *antiLoopState) {
 		ctx.Response.StatusCode,
 		time.Since(ctx.StartTime).Milliseconds(),
 		detectModel(ctx.OriginalBody),
-		s.selectUpstream(ctx.Format),
+		s.ctxUpstream(ctx),
 		buildRequestMeta(ctx.Data, ctx.Format, ctx.Transformed, cfg.ExtraPrompt != "" && cfg.ExtraPromptPlacement != "none", ctx.SemanticType),
 		ResponseMeta{
 			FinishReason:      state.finishReason,
@@ -1891,30 +1940,48 @@ func (s *ProxyServer) forwardStreamWithAntiLoop(ctx *ProxyContext) {
 	s.finalizeStream(ctx, state)
 }
 
-// activeProvider 返回当前选中的供应商；找不到时回退到第一个。
-func (s *ProxyServer) activeProvider() (Provider, bool) {
+// defaultProvider 返回默认供应商：配置列表第一位，也是路由未命中时的兜底目标。
+func (s *ProxyServer) defaultProvider() (Provider, bool) {
 	cfg := s.config.Get()
-	for _, p := range cfg.Providers {
-		if p.Name == cfg.ActiveProvider {
-			return p, true
-		}
-	}
 	if len(cfg.Providers) > 0 {
 		return cfg.Providers[0], true
 	}
 	return Provider{}, false
 }
 
-// selectUpstream 返回当前供应商对应当前请求格式的基础地址。
+// providerAPIKey 返回指定供应商的 API Key；供应商未配置时回退到全局 API Key。
+func (s *ProxyServer) providerAPIKey(p Provider) string {
+	if p.APIKey != "" {
+		return p.APIKey
+	}
+	return s.config.Get().APIKey
+}
+
+// ctxUpstream 返回本次请求实际使用的上游地址；上下文未记录时回退默认供应商（供 trace 记录使用）。
+func (s *ProxyServer) ctxUpstream(ctx *ProxyContext) string {
+	if ctx.Upstream != "" {
+		return ctx.Upstream
+	}
+	return s.selectUpstream(ctx.Format)
+}
+
+// selectUpstream 返回默认供应商对应当前请求格式的基础地址。
 // 同一供应商可同时服务 OpenAI 与 Anthropic 两种格式：
 //   - Anthropic 格式优先使用 AnthropicBaseURL（若已配置）；
 //   - 对已知 OpenAI 网关（如 api.deepseek.com）自动在其 base 后追加 /anthropic；
 //   - 否则回退到 BaseURL。
 // format 参数用于按请求格式选择正确端点，实现单地址自动匹配。
 func (s *ProxyServer) selectUpstream(format string) string {
-	if p, ok := s.activeProvider(); ok {
-		return s.resolveBaseURL(p, format)
+	if p, ok := s.defaultProvider(); ok {
+		if u := s.resolveBaseURL(p, format); u != "" {
+			return u
+		}
 	}
+	return s.legacyUpstream(format)
+}
+
+// legacyUpstream 是配置中没有任何供应商时的兜底地址（向后兼容旧的全局上游字段）。
+func (s *ProxyServer) legacyUpstream(format string) string {
 	cfg := s.config.Get()
 	if format == "anthropic" {
 		if cfg.AnthropicUpstream != "" {
@@ -1946,22 +2013,6 @@ func (s *ProxyServer) resolveBaseURL(p Provider, format string) string {
 		}
 	}
 	return p.BaseURL
-}
-
-// activeBaseURL 返回当前供应商的基础地址（供重试/分析等内部调用使用）。
-func (s *ProxyServer) activeBaseURL() string {
-	if p, ok := s.activeProvider(); ok {
-		return p.BaseURL
-	}
-	return s.selectUpstream("")
-}
-
-// activeAPIKey 返回当前供应商的 API Key；为空时回退到全局 APIKey。
-func (s *ProxyServer) activeAPIKey() string {
-	if p, ok := s.activeProvider(); ok && p.APIKey != "" {
-		return p.APIKey
-	}
-	return s.config.Get().APIKey
 }
 
 // joinUpstream 将基础地址与请求路径安全拼接。
@@ -2324,7 +2375,7 @@ func (s *ProxyServer) executeAndStreamAntiHallucination(
 	flusher, canFlush := ctx.ResponseWriter.(http.Flusher)
 
 	// 发起连接
-	retryResp, err := s.executeRetryCall(body, ctx.Format)
+	retryResp, err := s.executeRetryCall(body, ctx.Format, ctx.Provider)
 	if err != nil {
 		log.Printf("[antihallucination] retry call failed: %v", err)
 		s.logger.UpdateOnResponse(secondLogID, 502, time.Since(startTime).Milliseconds(), "completed", nil, string(body), "")

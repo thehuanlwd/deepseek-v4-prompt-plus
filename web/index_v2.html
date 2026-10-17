@@ -333,15 +333,25 @@
               <h2>供应商配置</h2>
 
               <div class="config-row">
-                <label>供应商名称</label>
-                <div style="display: flex; gap: 0.8rem; align-items: center;">
-                  <input type="text" id="curProviderNameInput" value="DeepSeek 官方"
-                    oninput="onCurProviderNameChange(this.value)" style="flex: 1;">
+                <label>供应商名称 / ID</label>
+                <div style="display: flex; gap: 0.8rem; align-items: flex-end;">
+                  <div style="flex: 1.4; min-width: 0;">
+                    <div class="provider-field-caption">名称</div>
+                    <input type="text" id="curProviderNameInput" value="DeepSeek 官方"
+                      oninput="onCurProviderNameChange(this.value)">
+                  </div>
+                  <div style="flex: 1; min-width: 0;">
+                    <div class="provider-field-caption">ID / 路由前缀</div>
+                    <input type="text" id="curProviderIdInput" value="DeepSeek" spellcheck="false"
+                      oninput="onCurProviderIdChange(this.value)">
+                  </div>
                   <button type="button" class="button button-accent" onclick="deleteCurrentModelProvider()" style="height: 34.67px; padding: 0 1.2rem; flex-shrink: 0;">
                     删除
                   </button>
                 </div>
-                <div class="hint" style="margin-top: 0.4rem;">在左侧供应商列表中切换对外提供服务的供应商</div>
+                <div class="hint" id="curProviderIdHint" style="margin-top: 0.4rem;">
+                  模型 ID 在多个供应商间重名时，对外模型名会显示为 [ID/模型ID]；ID 仅允许字母、数字、下划线、短横线，不区分大小写
+                </div>
               </div>
 
               <div class="config-row" style="margin-top: 1.5rem;">
@@ -445,8 +455,8 @@
                   </svg>
                 </div>
                 <div class="passthrough-text">
-                  <div class="passthrough-head">穿透模式激活中</div>
-                  <div class="passthrough-sub">
+                  <div class="passthrough-head" id="passthroughBannerTitle">穿透模式激活中</div>
+                  <div class="passthrough-sub" id="passthroughBannerText">
                     当前未限制任何模型。客户端发往本地端口的所有模型请求将默认原样转发给上游，保持全模型兼容。
                   </div>
                 </div>
@@ -471,21 +481,17 @@
           <div class="config-card">
             <h2 data-i18n="settings.basic_title">基础与代理配置</h2>
 
-            <!-- 当前供应商选择 -->
+            <!-- 默认供应商：由模型服务页列表顺序决定，此处仅作只读说明 -->
             <div class="config-row">
-              <label data-i18n="settings.active_provider">当前供应商</label>
-              <div class="provider-select-row">
-                <select id="cfgActiveProvider" onchange="onActiveProviderChange()"></select>
-                <button type="button" class="button" onclick="addProvider()"
-                  data-i18n="settings.provider_add">新增</button>
-                <button type="button" class="button button-accent" onclick="deleteProvider()"
-                  data-i18n="settings.provider_delete">删除</button>
-              </div>
-              <div class="hint" style="margin-top: 0.6rem; display: flex; align-items: center; justify-content: space-between;">
-                <span>提示：可在导航切换至 [模型服务] 进行多供应商测速、模型白名单与路由管理</span>
-                <button type="button" class="button" onclick="document.querySelector('.yorha-nav button[data-page=\'models\']').click()" style="font-size: 11px; padding: 2px 8px; height: auto;">
+              <label data-i18n="settings.active_provider">默认供应商</label>
+              <div style="display: flex; gap: 0.8rem; align-items: center; justify-content: space-between; flex-wrap: wrap;">
+                <span class="provider-default-name" id="cfgDefaultProviderName">—</span>
+                <button type="button" class="button" onclick="document.querySelector('.yorha-nav button[data-page=\'models\']').click()" style="font-size: 11px; padding: 2px 8px; height: auto; flex-shrink: 0;">
                   进入模型服务
                 </button>
+              </div>
+              <div class="hint" style="margin-top: 0.6rem;">
+                默认供应商 = [模型服务] 页供应商列表的第一位，拖拽即可调整。路由未命中的模型会原样透传给该供应商。
               </div>
             </div>
 
@@ -1026,7 +1032,15 @@
         </div>
         <div class="config-row">
           <label>供应商名称</label>
-          <input type="text" id="newProviderName" placeholder="例如: DeepSeek 备用">
+          <input type="text" id="newProviderName" placeholder="例如: DeepSeek 备用" oninput="onNewProviderNameInput()">
+        </div>
+        <div class="config-row">
+          <label>供应商 ID（路由前缀）</label>
+          <input type="text" id="newProviderId" placeholder="英文名称自动填充，可手动修改" spellcheck="false"
+            oninput="onNewProviderIdInput()">
+          <div class="hint" id="newProviderIdHint" style="margin-top: 0.4rem;">
+            仅允许字母、数字、下划线、短横线，不区分大小写。模型 ID 在多个供应商间重名时，对外模型名显示为 [ID/模型ID]
+          </div>
         </div>
         <div class="config-row">
           <label>基础地址 (Base URL)</label>

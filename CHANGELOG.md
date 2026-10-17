@@ -4,6 +4,50 @@ All notable changes to DSPlus are documented here. This project follows the [Kee
 
 ---
 
+## [0.2.4] - 2026-10-07
+
+### Added
+- **Multi-provider model routing (one endpoint, many upstreams)** — All enabled providers now serve simultaneously, dispatched by the `model` field of each request instead of a single global "active provider". When the same model ID is offered by more than one provider, every duplicate is exposed as `ProviderID/ModelID`; the prefix is stripped before forwarding, so the upstream still receives its real model name. Requests matching no configured model fall through to the default provider (first entry in the list) with the model name passed through unchanged.
+- **Provider ID and per-provider enable switch** — `providers[]` gained `id` (unique identifier, also used as the conflict prefix; letters, digits, underscores and hyphens only) and `enabled` (whether the provider takes part in routing). The GUI places the ID next to the provider name, fills it automatically from English names, warns on duplicates, and replaces the old single-choice switch with an independent enable toggle per provider. The first entry is the default provider and cannot be disabled.
+- **Drag-and-drop provider ordering** — The provider list can be reordered by dragging; the first entry is the default provider. Auto-save is paused while dragging and flushed once on drop.
+- **Model route preview endpoint and conflict badges** — `GET /api/route/preview` returns the resolved routing table; the model list shows the public model ID (conflict prefix highlighted), the owning provider and a status badge (prefixed / unroutable / disabled), plus a summary bar counting conflicts and shadowed entries.
+- **Route table unit tests** — `route_test.go` covers conflict prefixing, three-way conflicts, shadowed entries, pass-through providers, disabled providers, model IDs containing `/`, prefix matching case-insensitivity, fallback behaviour and legacy ID migration.
+
+### Changed
+- **Default provider now follows list order** — `active_provider` is kept only for backward compatibility and stays in sync with the first entry; it is no longer used for routing, which also removes the silent mis-selection that occurred when two providers shared a name.
+- **`/v1/models` merges all enabled providers** — conflicting entries appear with their prefix; entries shadowed by a second-level conflict are not exposed.
+- **Anti-loop retries and the analyzer sub-agent stay on the provider that served the request** — previously they always targeted the globally active provider.
+- **Legacy configuration migration** — providers without an `id` get one generated on load (English names reuse the name, others become `provider1`, `provider2`, … with numeric suffixes on collision); a legacy `active_provider` pointing at a non-first provider is moved to the front once, so the previously selected provider stays the default. Providers without `enabled` are treated as enabled.
+- **Settings page** — the "current provider" dropdown and the add/remove buttons are gone; the page now shows the default provider read-only with a link to the model services page, and its editor targets the first provider.
+
+### Fixed
+- **Missing `anthropic_base_url` on the analyzer sub-agent** — the anti-loop analyzer now resolves its endpoint through the same format-aware helper as the main request instead of hard-coding `base_url + /chat/completions`.
+- **API keys could be encrypted twice** — saving a configuration whose key was already stored in `ENC:` form (for example after a decryption failure) no longer re-encrypts the ciphertext, which previously left the GUI displaying an unusable value.
+- **Test suite aligned with the implementation** — Two long-failing unit tests were corrected: format detection now verifies both behaviours separately (no known protocol path → decide from the request body; known path → the path wins), and body truncation now checks the keep-head-and-tail strategy (the old assertions still assumed tail truncation with a `[truncated]` marker).
+
+## [0.2.4] 中文 - 2026-10-07
+
+### Added（新增）
+- **多供应商模型路由（一个接口对接多个上游）** — 所有已启用的供应商同时生效，按每次请求的 `model` 字段分发，而不再由全局「当前供应商」独占。同一模型 ID 出现在多个供应商时，所有重名项对外统一显示为 `供应商ID/模型ID`，转发前会剥掉前缀还原上游真实模型名；未命中任何已配置模型的请求回退到默认供应商（列表第一位）并原样透传模型名。
+- **供应商 ID 与独立启用开关** — `providers[]` 新增 `id`（唯一标识，同时作为冲突前缀，仅允许字母、数字、下划线、短横线）与 `enabled`（是否参与路由）。界面在供应商名称旁增加 ID 输入框，英文名称自动填充、重复时提醒，并把原来的单选开关换成每个供应商独立的启用开关；第一位为默认供应商且不可关闭。
+- **供应商拖拽排序** — 供应商列表支持拖拽调整顺序，第一位即默认供应商；拖拽期间暂停自动保存，落位后统一提交一次。
+- **模型路由预览接口与冲突徽标** — 新增 `GET /api/route/preview` 返回解析后的路由表；模型列表展示对外模型 ID（冲突前缀高亮）、归属供应商与状态徽标（已加前缀 / 无法路由 / 未启用），顶部显示冲突与遮蔽数量汇总。
+- **路由表单元测试** — `route_test.go` 覆盖冲突加前缀、三方冲突、遮蔽项、穿透模式供应商、未启用供应商、含 `/` 的模型名、前缀大小写不敏感、未命中回退与旧配置 ID 迁移。
+
+### Changed（变更）
+- **默认供应商改由列表顺序决定** — `active_provider` 仅作兼容保留并与第一位保持同步，不再参与路由；由此消除了两个供应商同名时静默命中错误项的隐患。
+- **模型清单接口合并输出** — `/v1/models` 合并所有已启用供应商的清单，重名项带前缀；因二次冲突被遮蔽的条目不再对外暴露。
+- **防循环重试与分析子Agent跟随本次命中的供应商** — 此前无论请求发往哪里，它们都固定打到全局活动供应商。
+- **旧配置自动迁移** — 没有 `id` 的供应商在加载时自动生成（英文名称取同名，其余按 `provider1`、`provider2` 顺序并在冲突时加序号）；旧的 `active_provider` 若指向非首位供应商，会一次性上移到首位，使用户原先选定的供应商继续作为默认供应商；没有 `enabled` 的供应商视为启用。
+- **设置页调整** — 移除「当前供应商」下拉框与供应商增删按钮，改为只读展示默认供应商并提供跳转入口；设置页的供应商编辑区固定编辑第一位（默认供应商）。
+
+### Fixed（修复）
+- **分析子Agent遗漏 `anthropic_base_url`** — 防循环分析器的端点改为与主请求共用同一套格式感知解析，不再硬编码 `base_url + /chat/completions`。
+- **API Key 可能被二次加密** — 保存时若密钥已是 `ENC:` 密文（例如解密失败的保留值），不再重复加密，避免界面只能看到无法使用的一串密文。
+- **测试与实现对齐** — 修正两条长期失败的单元测试：请求格式识别拆成两条分别验证「未命中已知协议路径时按请求体判定」与「命中协议路径时路径优先」；日志截断改为校验「保头尾、省略中段」策略（原断言停留在旧的尾部截断 + 英文标记实现）。
+
+---
+
 ## [0.2.3] - 2026-10-02
 
 ### Added

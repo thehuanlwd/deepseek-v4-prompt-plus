@@ -1980,6 +1980,130 @@ textarea {
   letter-spacing: 0.05rem;
 }
 
+/* ── 供应商拖拽排序 ── */
+.provider-drag-handle {
+  width: 10px;
+  flex-shrink: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  cursor: grab;
+  opacity: 0.4;
+}
+
+.provider-drag-handle:hover {
+  opacity: 0.85;
+}
+
+.provider-drag-handle span {
+  display: block;
+  height: 1px;
+  background-color: currentColor;
+}
+
+.provider-list-item.dragging {
+  opacity: 0.35;
+}
+
+.provider-list-item.drop-before::before,
+.provider-list-item.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: var(--yorha-accent);
+  z-index: 2;
+}
+
+.provider-list-item.drop-before::before {
+  top: -1px;
+}
+
+.provider-list-item.drop-after::after {
+  bottom: -1px;
+}
+
+.provider-default-tag {
+  font-size: 9px;
+  font-weight: bold;
+  letter-spacing: 0.05rem;
+  padding: 1px 5px;
+  border: 0.05rem solid var(--yorha-accent);
+  color: var(--yorha-accent) !important;
+  flex-shrink: 0;
+}
+
+.provider-disabled-state {
+  font-size: 10px;
+  opacity: 0.55;
+}
+
+/* ── 供应商名称 / ID 同行输入 ── */
+.provider-field-caption {
+  font-size: 10px;
+  letter-spacing: 0.08rem;
+  opacity: 0.6;
+  margin-bottom: 3px;
+}
+
+.provider-default-name {
+  font-family: monospace;
+  font-size: 0.9rem;
+  font-weight: bold;
+}
+
+/* ── 模型路由状态徽标 ── */
+.model-route-badge {
+  font-size: 9px;
+  font-weight: bold;
+  letter-spacing: 0.05rem;
+  padding: 1px 5px;
+  border: 0.05rem solid currentColor;
+  flex-shrink: 0;
+}
+
+.model-route-badge.conflicted {
+  color: var(--yorha-accent) !important;
+}
+
+.model-route-badge.unroutable {
+  color: #9c412b !important;
+}
+
+.model-route-badge.disabled {
+  color: #747266 !important;
+}
+
+.model-public-id {
+  font-family: monospace;
+  font-size: 10px;
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+.model-public-id .route-prefix {
+  color: var(--yorha-accent) !important;
+  font-weight: bold;
+}
+
+.model-route-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.5rem 0.8rem;
+  border: 0.05rem solid var(--yorha-border);
+  font-size: 11px;
+  margin-bottom: 0.8rem;
+}
+
+.model-route-summary .accent-count {
+  color: var(--yorha-accent) !important;
+  font-weight: bold;
+}
+
 .models-sidebar-footer {
   padding: 0.8rem 1rem;
   border-top: 0.1rem solid var(--yorha-border);

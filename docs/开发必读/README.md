@@ -18,6 +18,7 @@
 | [`BUG_FEEDBACK_LOOP_CONTENT_EMPTY.md`](BUG_FEEDBACK_LOOP_CONTENT_EMPTY.md) | 坑点 | 推理模型 feedback 循环致 content 为空 |
 | [`2026-06-07-analysis-service-design.md`](2026-06-07-analysis-service-design.md) | 设计 | 分析服务初版设计规格 |
 | [`2026-06-14-analysis-lossless-storage-performance-design.md`](2026-06-14-analysis-lossless-storage-performance-design.md) | 设计 | 无损存储与大会话性能修复设计 |
+| [`2026-10-07-multi-provider-model-routing-design.md`](2026-10-07-multi-provider-model-routing-design.md) | 设计 | 多供应商模型路由：冲突加前缀、默认供应商、启用开关与迁移规则 |
 
 ## 修改代码前建议
 
