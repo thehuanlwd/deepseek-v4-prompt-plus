@@ -113,9 +113,11 @@
   "settings.auto_fix_empty_desc": "把历史中空的 assistant content 用 reasoning 回填，避免循环请求",
   "settings.anti_hallucination": "防幻觉 (意图校准)",
   "settings.anti_hallucination_desc": "在模型思考完、准备输出正式回答前强行注入最新用户意图进行校准",
+  "settings.anti_hallucination_mode_notice": "已切换为「改写回传」：不带工具的请求不再纯透传，响应会先解压、逐行解析并改写，再以明文回传给客户端。",
 
   "settings.antiloop_title": "防无限思考 (Anti-Loop)",
   "settings.antiloop_desc": "检测被截断时自动分析并重试",
+  "settings.antiloop_mode_notice": "已切换为「改写回传」：所有请求不再纯透传，响应会先解压、逐行解析，必要时中断并重试，再以明文回传给客户端。",
   "settings.antiloop_retry_model": "重试模型",
   "settings.antiloop_retry_thinking": "重试时启用思考",
   "settings.antiloop_retry_effort": "重试思考强度",

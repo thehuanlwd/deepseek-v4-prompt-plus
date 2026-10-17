@@ -1288,17 +1288,50 @@ function syncProviderFromEditor() {
   if (typeof renderModelProvidersList === 'function') renderModelProvidersList();
 }
 
+// 请求后端解密真实密钥：config 接口只回传脱敏值，明文由该接口按需取
+async function revealProviderKey(providerId) {
+  try {
+    const r = await fetch('/api/config/reveal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider_id: providerId || '' })
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return typeof data.api_key === 'string' ? data.api_key : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function toggleSecretInput(input, providerId) {
+  const btn = input?.parentElement?.querySelector('.yorha-eye-btn');
+  if (!input || !btn) return;
+  if (input.type === 'text') {
+    input.type = 'password';
+    // 未编辑时恢复脱敏值，避免明文长期留在输入框里
+    if (input.dataset.revealedValue && input.value === input.dataset.revealedValue) {
+      input.value = input.dataset.maskedValue || '';
+    }
+    delete input.dataset.revealedValue;
+    delete input.dataset.maskedValue;
+    btn.classList.remove('visible');
+    return;
+  }
+  const key = await revealProviderKey(providerId);
+  if (key === null) return;
+  input.dataset.maskedValue = input.value;
+  input.dataset.revealedValue = key;
+  input.value = key;
+  input.type = 'text';
+  btn.classList.add('visible');
+}
+
 function toggleProviderKeyVisibility() {
   const input = $('cfgProviderKey');
-  const btn = input.parentElement.querySelector('.yorha-eye-btn');
-  if (!input || !btn) return;
-  if (input.type === 'password') {
-    input.type = 'text';
-    btn.classList.add('visible');
-  } else {
-    input.type = 'password';
-    btn.classList.remove('visible');
-  }
+  if (!input) return;
+  const p = providersData[0];
+  return toggleSecretInput(input, p ? p.ID : '');
 }
 
 // ── 保存配置 ──
@@ -3128,15 +3161,9 @@ async function testProviderPing() {
 // ── 切换 API Key 明密文显示 ──
 function toggleModelApiKeyVisibility() {
   const input = $('curProviderApiKey');
-  const btn = input?.parentElement?.querySelector('.yorha-eye-btn');
-  if (!input || !btn) return;
-  if (input.type === 'password') {
-    input.type = 'text';
-    btn.classList.add('visible');
-  } else {
-    input.type = 'password';
-    btn.classList.remove('visible');
-  }
+  if (!input) return;
+  const p = providersData[curModelProviderIdx];
+  return toggleSecretInput(input, p ? p.ID : '');
 }
 
 // ── 渲染模型列表 (分组折叠与穿透检测) ──

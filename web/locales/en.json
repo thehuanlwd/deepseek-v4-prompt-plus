@@ -113,9 +113,11 @@
   "settings.auto_fix_empty_desc": "Backfill empty assistant content with reasoning to break loops",
   "settings.anti_hallucination": "Anti-hallucination (Intent Calibration)",
   "settings.anti_hallucination_desc": "Force inject latest user intent before final answer",
+  "settings.anti_hallucination_mode_notice": "Switched to rewrite delivery: requests without tools leave the pure passthrough path. The response is decompressed, parsed and rewritten, then returned to the client as plain text.",
 
   "settings.antiloop_title": "Anti Infinite Thinking (Anti-Loop)",
   "settings.antiloop_desc": "Auto analyze and retry when output is truncated",
+  "settings.antiloop_mode_notice": "Switched to rewrite delivery: every request leaves the pure passthrough path. The response is decompressed and parsed, aborted and retried when needed, then returned to the client as plain text.",
   "settings.antiloop_retry_model": "Retry Model",
   "settings.antiloop_retry_thinking": "Enable thinking on retry",
   "settings.antiloop_retry_effort": "Retry Reasoning Effort",

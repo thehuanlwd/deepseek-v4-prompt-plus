@@ -636,11 +636,11 @@ DSPlus is a local proxy, but it processes your complete request and response con
 
 | Item | Description |
 |---|---|
-| API Key | Saved locally in `config.json`; do not commit to public repos |
+| API Key | Saved locally in `config.json` with an `ENC:` prefix. This is obfuscation, not strong encryption: the key material ships with the binary, so anyone holding the binary can recover it. It only prevents casual reading of the file. The dashboard and `/api/config` return masked values; plaintext is fetched on demand and only by a same-origin request from an IP-literal host. Do not commit `config.json` |
 | Request content | May contain private data, business data, code, or prompts |
 | verbose_logging | When on, GUI request details keep more complete request / response content |
 | analysis_enabled | When on, generates local analysis history for session viewing and export |
-| LAN Access | When on, listens on `0.0.0.0`; only recommended on trusted networks |
+| LAN Access | When on, listens on `0.0.0.0`. The dashboard has no login, so every device on that network can read and change the configuration, and can reveal stored API keys through the dashboard. Only enable it on trusted networks |
 | Log files | Anti-loop traces and analysis history may be written to local files; clean them periodically |
 
 Suggestions:
@@ -721,4 +721,4 @@ Locally in `config.json` next to `DSPlus.exe`. Do not commit it to public reposi
 
 ### License
 
-Please refer to the actual License file in the repository. If you plan to release it publicly, it is recommended to add a clear open-source license.
+MIT License. See [LICENSE](LICENSE).

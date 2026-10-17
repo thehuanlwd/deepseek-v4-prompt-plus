@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,9 +31,10 @@ const (
 	expectContinueTimeout = 1 * time.Second
 
 	// Streaming / buffering.
-	scannerInitialBuf = 65536    // 64 KB
-	scannerMaxBuf     = 10485760 // 10 MB
-	captureBufCap     = 10485760 // 10 MB
+	scannerInitialBuf  = 65536    // 64 KB
+	scannerMaxBuf      = 10485760 // 10 MB
+	captureBufCap      = 10485760 // 10 MB
+	passthroughBufSize = 32768    // 32 KB，纯透传转发的读写块大小
 
 	// Logging.
 	truncateBodyMaxLen = 5242880 // 5 MB
@@ -258,6 +261,10 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	copyHeaders(proxyReq.Header, r.Header)
+	// 客户端声明的压缩编码原样透传会带来两种后果：客户端支持 br/zstd 但我们无法解码，
+	// 一旦上游选中这些编码，解析与改写都会失效。这里只收敛到本进程能解码的编码，
+	// 请求内容与压缩与否仍由上游决定，不改变透传语义。
+	sanitizeAcceptEncoding(proxyReq.Header)
 	key := s.providerAPIKey(provider)
 	proxyReq.Header.Set("Authorization", "Bearer "+key)
 	if format == "anthropic" {
@@ -338,10 +345,10 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := &ProxyContext{
-		ResponseWriter:  w,
-		Response:        resp,
-		LogID:           logID,
-		StartTime:       startTime,
+		ResponseWriter: w,
+		Response:       resp,
+		LogID:          logID,
+		StartTime:      startTime,
 
 		Format:          format,
 		Route:           r.URL.Path,
@@ -355,6 +362,26 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 		TurnID:          turnID,
 		SemanticType:    semanticType,
 		HasTools:        hasTools,
+	}
+
+	// 响应改写模式：只有会改动响应内容的开关才需要把正文解成明文再解析/重写。
+	// 防循环要在流中判定并中断重试；防幻觉要在首条正文前截断并补发校准词。
+	// 其余开关（reasoning_content 补全、空 content 修复、规则设置）都只作用于请求体，
+	// 与响应路径无关，因此这类请求走纯透传。
+	rewriteMode := cfg.AntiLoopEnabled || (cfg.AntiHallucinationEnabled && !hasTools)
+	if rewriteMode {
+		decoded, decErr := openDecodedBody(resp)
+		if decErr != nil {
+			log.Printf("[proxy] decode upstream body: %v", decErr)
+			s.logger.UpdateOnResponse(logID, resp.StatusCode, time.Since(startTime).Milliseconds(), "completed", respHeaders, "", "")
+			http.Error(w, "Failed to decode upstream response", http.StatusBadGateway)
+			return
+		}
+		if decoded != resp.Body {
+			defer decoded.Close()
+			resp.Body = decoded
+			ctx.Response = resp
+		}
 	}
 
 	// ── Anti-Loop detection ──
@@ -430,28 +457,39 @@ func (s *ProxyServer) handleProxy(w http.ResponseWriter, r *http.Request) {
 			originalBody,
 			string(bodyBytes),
 		)
-	traceEv.UpstreamRequest = string(transformedBody)
-	// 非流式整轮完成：回填总耗时（首响 latency_ms 已在上方 connecting 阶段记录）
-	s.logger.UpdateTotalMs(logID, time.Since(startTime).Milliseconds())
-	s.analysisSvc.SubmitEvent(traceEv)
+		traceEv.UpstreamRequest = string(transformedBody)
+		// 非流式整轮完成：回填总耗时（首响 latency_ms 已在上方 connecting 阶段记录）
+		s.logger.UpdateTotalMs(logID, time.Since(startTime).Milliseconds())
+		s.analysisSvc.SubmitEvent(traceEv)
 
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	w.Write(bodyBytes)
-	return
+		copyHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		w.Write(bodyBytes)
+		return
 	}
 
-	// ── Normal path (anti-loop disabled): stream/buffer to client immediately ──
+	// ── Normal path: 需要改写时按行重写，否则字节原样透传 ──
 	latency := time.Since(startTime)
 	s.logger.UpdateOnResponse(logID, resp.StatusCode, latency.Milliseconds(), "connecting", respHeaders, "", "")
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
+	if rewriteMode {
+		if isStream {
+			s.forwardStream(ctx)
+		} else {
+			s.forwardBuffered(ctx)
+		}
+		return
+	}
+
+	// 纯透传：不解压、不解析、不改写，转发字节与本进程收到的完全一致；
+	// 统计与诊断改为旁路解析副本，不影响转发。
 	if isStream {
-		s.forwardStream(ctx)
+		s.forwardPassthrough(ctx)
 	} else {
-		s.forwardBuffered(ctx)
+		s.forwardPassthroughBuffered(ctx)
 	}
 }
 
@@ -1061,23 +1099,39 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 			secondRespBody,
 		)
 		retryEv.UpstreamRequest = string(secondReqBody)
-	retryEv.ParentID = "ev_" + strconv.FormatInt(ctx.StartTime.UnixNano(), 36)
-	s.analysisSvc.SubmitEvent(retryEv)
+		retryEv.ParentID = "ev_" + strconv.FormatInt(ctx.StartTime.UnixNano(), 36)
+		s.analysisSvc.SubmitEvent(retryEv)
 
-	// 防幻觉截断：主请求到此结束，回填整轮耗时（含首阶段生成与截断判定）
-	s.logger.UpdateTotalMs(ctx.LogID, time.Since(ctx.StartTime).Milliseconds())
+		// 防幻觉截断：主请求到此结束，回填整轮耗时（含首阶段生成与截断判定）
+		s.logger.UpdateTotalMs(ctx.LogID, time.Since(ctx.StartTime).Milliseconds())
 
-	return
-}
+		return
+	}
 
 	// ── 情况二：常规模式走完 ──
+	s.finalizeRegularStream(ctx, capture, contentBuilder.String(), reasoningBuilder.String(), finishReason, hasToolsInStream, lastUsage)
+}
+
+// finalizeRegularStream 收尾一条普通流式响应：回填用量、落库正文、提交诊断事件。
+// 改写链路与纯透传旁路解析共用同一份收尾逻辑，保证两种模式下仪表盘口径一致。
+func (s *ProxyServer) finalizeRegularStream(
+	ctx *ProxyContext,
+	capture *captureBuffer,
+	content string,
+	reasoning string,
+	finishReason string,
+	hasToolsInStream bool,
+	lastUsage *TokenUsage,
+) {
+	cfg := s.config.Get()
+
 	finalAction := s.updateFinalSemanticAction(ctx.LogID, ctx.SemanticType, ctx.HasTools, hasToolsInStream, finishReason)
 	ctx.SemanticType = finalAction
 
 	if lastUsage != nil {
 		s.logger.UpdateTokenUsageAndStatus(ctx.LogID, lastUsage, "completed")
 	} else {
-		totalChars := len(reasoningBuilder.String()) + len(contentBuilder.String())
+		totalChars := len(reasoning) + len(content)
 		estCompletion := int64(float64(totalChars) / 2.3)
 		var estPrompt int64
 		if ctx.Data != nil {
@@ -1120,8 +1174,8 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 			TotalTokens:      int(pm.Total),
 			CacheHitTokens:   int(pm.CacheHit),
 			CacheMissTokens:  int(pm.CacheMiss),
-			ReasoningContent: reasoningBuilder.String(),
-			Content:          contentBuilder.String(),
+			ReasoningContent: reasoning,
+			Content:          content,
 		},
 		ctx.OriginalBody,
 		capture.String(),
@@ -1131,7 +1185,6 @@ func (s *ProxyServer) forwardStream(ctx *ProxyContext) {
 }
 
 func (s *ProxyServer) forwardBuffered(ctx *ProxyContext) {
-	cfg := s.config.Get()
 	bodyBytes, err := io.ReadAll(ctx.Response.Body)
 	if err != nil {
 		log.Printf("[proxy] forwardBuffered read error: %v", err)
@@ -1140,6 +1193,34 @@ func (s *ProxyServer) forwardBuffered(ctx *ProxyContext) {
 	}
 	bodyBytes = replaceDSMLMarkersBytes(bodyBytes)
 	ctx.ResponseWriter.Write(bodyBytes)
+	s.recordBufferedResponse(ctx, bodyBytes)
+}
+
+// forwardPassthroughBuffered 用于非流式请求的纯透传：原文写回客户端，
+// 另用解压后的副本做统计与诊断，不改动任何发出去的字节。
+func (s *ProxyServer) forwardPassthroughBuffered(ctx *ProxyContext) {
+	raw, err := io.ReadAll(ctx.Response.Body)
+	if err != nil {
+		log.Printf("[proxy] passthrough read error: %v", err)
+		s.logger.UpdateTokenUsageAndStatus(ctx.LogID, nil, "completed")
+		return
+	}
+	if _, werr := ctx.ResponseWriter.Write(raw); werr != nil {
+		log.Printf("[proxy] passthrough write error: %v", werr)
+	}
+
+	plain := raw
+	if dec, changed, decErr := decodeReader(ctx.Response.Header.Get("Content-Encoding"), bytes.NewReader(raw)); decErr == nil && changed {
+		if b, rerr := io.ReadAll(dec); rerr == nil {
+			plain = b
+		}
+	}
+	s.recordBufferedResponse(ctx, plain)
+}
+
+// recordBufferedResponse 解析非流式响应正文并落库，不负责写回客户端。
+func (s *ProxyServer) recordBufferedResponse(ctx *ProxyContext, bodyBytes []byte) {
+	cfg := s.config.Get()
 
 	var lastUsage *TokenUsage
 	if u := extractUsageFromBody(string(bodyBytes)); u != nil {
@@ -1193,6 +1274,121 @@ func (s *ProxyServer) forwardBuffered(ctx *ProxyContext) {
 	// 非流式整轮完成：回填总耗时（首响 latency_ms 已在 connecting 阶段记录）
 	s.logger.UpdateTotalMs(ctx.LogID, time.Since(ctx.StartTime).Milliseconds())
 	s.analysisSvc.SubmitEvent(traceEv)
+}
+
+// forwardPassthrough 纯透传：上游字节按原样写给客户端，不解压、不解析、不改写。
+// 为保证仪表盘与诊断分析不丢数据，同一份字节会旁路送进解析器；
+// 旁路异常只影响统计，绝不影响转发。
+func (s *ProxyServer) forwardPassthrough(ctx *ProxyContext) {
+	w := ctx.ResponseWriter
+	flusher, canFlush := w.(http.Flusher)
+
+	pr, pw := io.Pipe()
+	tapDone := make(chan struct{})
+	go func() {
+		defer close(tapDone)
+		s.tapResponseStream(ctx, pr)
+	}()
+
+	buf := make([]byte, passthroughBufSize)
+	for {
+		n, readErr := ctx.Response.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				log.Printf("[proxy] passthrough write error: %v", werr)
+				break
+			}
+			if _, perr := pw.Write(buf[:n]); perr != nil {
+				// 旁路已退出（例如解码失败），转发继续，仅失去本次统计
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	ctx.Response.Body.Close()
+	pw.Close()
+	<-tapDone
+	s.logger.UpdateTotalMs(ctx.LogID, time.Since(ctx.StartTime).Milliseconds())
+}
+
+// tapResponseStream 旁路解析响应副本：只更新统计与诊断，不写客户端。
+func (s *ProxyServer) tapResponseStream(ctx *ProxyContext, pr *io.PipeReader) {
+	defer pr.Close()
+
+	dec, changed, decErr := decodeReader(ctx.Response.Header.Get("Content-Encoding"), pr)
+	if decErr != nil {
+		log.Printf("[proxy] passthrough tap decode error: %v", decErr)
+		io.Copy(io.Discard, pr)
+		return
+	}
+	if !changed {
+		dec = pr
+	}
+
+	capture := newCaptureBuffer(captureBufCap)
+	scanner := bufio.NewScanner(dec)
+	scanner.Buffer(make([]byte, 0, scannerInitialBuf), scannerMaxBuf)
+
+	var reasoningBuilder strings.Builder
+	var contentBuilder strings.Builder
+	var lastUsage *TokenUsage
+	var finishReason string
+	var hasToolsInStream bool
+	var lastPushTime time.Time
+
+	var estPrompt int64
+	if ctx.Data != nil {
+		estPrompt = int64(float64(len(ctx.OriginalBody)) / 2.5)
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		capture.Write([]byte(line + "\n"))
+
+		delta, err := ParseSSELine(line)
+		if err != nil || delta == nil {
+			continue
+		}
+		if delta.ReasoningContent != "" {
+			reasoningBuilder.WriteString(delta.ReasoningContent)
+		}
+		if delta.Content != "" {
+			contentBuilder.WriteString(delta.Content)
+		}
+		if hasToolCallsInDelta(delta) {
+			hasToolsInStream = true
+		}
+		if delta.Usage != nil {
+			lastUsage = delta.Usage
+		}
+		if delta.FinishReason != "" {
+			finishReason = delta.FinishReason
+		}
+
+		if delta.ReasoningContent != "" || delta.Content != "" {
+			now := time.Now()
+			if lastPushTime.IsZero() || now.Sub(lastPushTime) >= 200*time.Millisecond {
+				lastPushTime = now
+				totalChars := reasoningBuilder.Len() + contentBuilder.Len()
+				estCompletion := int64(float64(totalChars) / 2.3)
+				s.logger.UpdateTokenUsageAndStatus(ctx.LogID, &TokenUsage{
+					Prompt:     estPrompt,
+					Completion: estCompletion,
+					Total:      estPrompt + estCompletion,
+				}, "streaming")
+			}
+		}
+	}
+
+	// 解析提前结束时把管道排空，避免转发侧写入阻塞。
+	io.Copy(io.Discard, dec)
+
+	s.finalizeRegularStream(ctx, capture, contentBuilder.String(), reasoningBuilder.String(), finishReason, hasToolsInStream, lastUsage)
 }
 
 type antiLoopState struct {
@@ -1544,7 +1740,7 @@ func (s *ProxyServer) executeRetryPhase2(ctx *ProxyContext, state *antiLoopState
 	// ── 拦截防幻觉并在 Anti-Loop 下处理 ──
 	if state.earlyStop && state.earlyStopAnalysis != nil && state.earlyStopAnalysis.Judgment == "antihallucination" {
 		log.Printf("[antiloop] reqID=%d hijacked by Anti-Hallucination continuation", state.reqID)
-		
+
 		latestUserMsg := getLatestUserMsg(ctx.Data)
 		calibrationPrompt := cfg.AntiHallucinationPrompt
 		if calibrationPrompt == "" {
@@ -1970,6 +2166,7 @@ func (s *ProxyServer) ctxUpstream(ctx *ProxyContext) string {
 //   - Anthropic 格式优先使用 AnthropicBaseURL（若已配置）；
 //   - 对已知 OpenAI 网关（如 api.deepseek.com）自动在其 base 后追加 /anthropic；
 //   - 否则回退到 BaseURL。
+//
 // format 参数用于按请求格式选择正确端点，实现单地址自动匹配。
 func (s *ProxyServer) selectUpstream(format string) string {
 	if p, ok := s.defaultProvider(); ok {
@@ -2103,6 +2300,92 @@ func messagesContainRole(messages []interface{}, role string) bool {
 func isJSON(s string) bool {
 	s = strings.TrimSpace(s)
 	return len(s) > 0 && s[0] == '{'
+}
+
+// sanitizeAcceptEncoding 把转发给上游的 Accept-Encoding 收敛到本进程能解码的编码。
+// 客户端声明 br/zstd 时上游可能选中它们，而标准库只能解 gzip/deflate，
+// 一旦命中会让解析、注入与改写全部失效。这里不关闭压缩，只是不用解不了的那两种。
+// 客户端未声明时保持空值，由 Go 传输层自动协商 gzip 并自动解压。
+func sanitizeAcceptEncoding(h http.Header) {
+	raw := h.Get("Accept-Encoding")
+	if raw == "" {
+		return
+	}
+	var kept []string
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(raw, ",") {
+		token := strings.ToLower(strings.TrimSpace(strings.SplitN(part, ";", 2)[0]))
+		switch token {
+		case "gzip", "x-gzip", "deflate":
+			if !seen[token] {
+				seen[token] = true
+				kept = append(kept, token)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		h.Set("Accept-Encoding", "identity")
+		return
+	}
+	h.Set("Accept-Encoding", strings.Join(kept, ", "))
+}
+
+// decodeReader 按 Content-Encoding 包一层解码读取器；changed=false 表示正文本来就是明文。
+func decodeReader(encoding string, src io.Reader) (io.Reader, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return src, false, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(src)
+		if err != nil {
+			return nil, false, err
+		}
+		return zr, true, nil
+	case "deflate":
+		zr, err := zlib.NewReader(src)
+		if err != nil {
+			return nil, false, err
+		}
+		return zr, true, nil
+	default:
+		return nil, false, fmt.Errorf("unsupported content-encoding %q", encoding)
+	}
+}
+
+// openDecodedBody 在需要改写响应时把压缩流解成明文，并移除编码与长度头，
+// 使后续解析与回写全部工作在明文上；客户端收到的将是明文 SSE（HTTP 允许）。
+func openDecodedBody(resp *http.Response) (io.ReadCloser, error) {
+	if resp.StatusCode == http.StatusNoContent || resp.ContentLength == 0 {
+		return resp.Body, nil
+	}
+	dec, changed, err := decodeReader(resp.Header.Get("Content-Encoding"), resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return resp.Body, nil
+	}
+	closer, ok := dec.(io.Closer)
+	if !ok {
+		return nil, fmt.Errorf("content-encoding %q cannot be closed", resp.Header.Get("Content-Encoding"))
+	}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	return &decodedBody{Reader: dec, decoded: closer, raw: resp.Body}, nil
+}
+
+type decodedBody struct {
+	io.Reader
+	decoded io.Closer
+	raw     io.Closer
+}
+
+func (d *decodedBody) Close() error {
+	err := d.decoded.Close()
+	if rerr := d.raw.Close(); err == nil {
+		err = rerr
+	}
+	return err
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -2349,7 +2632,7 @@ func (s *ProxyServer) writeCalibrationSSE(
 			"type":  "content_block_delta",
 			"index": 0,
 			"delta": map[string]interface{}{
-				"type": "thinking_delta",
+				"type":     "thinking_delta",
 				"thinking": text,
 			},
 		}
@@ -2400,6 +2683,11 @@ func (s *ProxyServer) executeAndStreamAntiHallucination(
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = replaceDSMLMarkers(line)
+
+		// 结束标记由调用方统一补发：跳过二阶段上游的 [DONE]，避免重复结束事件。
+		if strings.TrimSpace(line) == "data: [DONE]" {
+			continue
+		}
 
 		if delta, err := ParseSSELine(line); err == nil && delta != nil {
 			if delta.FinishReason != "" {

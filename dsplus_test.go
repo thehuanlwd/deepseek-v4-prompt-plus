@@ -244,9 +244,9 @@ func TestParseUsageFromMap_Standard(t *testing.T) {
 func TestParseUsageFromMap_CacheFields(t *testing.T) {
 	data := map[string]interface{}{
 		"usage": map[string]interface{}{
-			"prompt_tokens":           float64(100),
-			"completion_tokens":       float64(50),
-			"prompt_cache_hit_tokens": float64(80),
+			"prompt_tokens":            float64(100),
+			"completion_tokens":        float64(50),
+			"prompt_cache_hit_tokens":  float64(80),
 			"prompt_cache_miss_tokens": float64(20),
 		},
 	}
@@ -359,8 +359,80 @@ func TestMaskAPIKey(t *testing.T) {
 }
 
 func TestMaskAPIKey_Short(t *testing.T) {
-	if maskAPIKey("short") != "short" {
-		t.Error("short keys should not be masked")
+	if maskAPIKey("short") != "****" {
+		t.Error("short keys should be fully masked")
+	}
+	if maskAPIKey("") != "" {
+		t.Error("empty key should stay empty")
+	}
+}
+
+// TestConfigForClientMasksKeys 保障 GET /api/config 不回传任何明文密钥，
+// 且脱敏过程不能改写内存中的真实配置。
+func TestConfigForClientMasksKeys(t *testing.T) {
+	realKey := "sk-real-abcdefghijklmn"
+	cfg := Config{
+		APIKey: "sk-legacy-zyxwvutsrq",
+		Providers: []Provider{
+			{ID: "DeepSeek", APIKey: realKey},
+			{ID: "empty", APIKey: ""},
+		},
+	}
+
+	out := configForClient(cfg)
+	if out.APIKey == cfg.APIKey || !strings.Contains(out.APIKey, "*") {
+		t.Errorf("顶层密钥应脱敏: %q", out.APIKey)
+	}
+	if out.Providers[0].APIKey == realKey || !strings.Contains(out.Providers[0].APIKey, "*") {
+		t.Errorf("供应商密钥应脱敏: %q", out.Providers[0].APIKey)
+	}
+	if out.Providers[1].APIKey != "" {
+		t.Errorf("空密钥应保持空: %q", out.Providers[1].APIKey)
+	}
+	if cfg.Providers[0].APIKey != realKey || cfg.APIKey != "sk-legacy-zyxwvutsrq" {
+		t.Error("脱敏副本不得改写真实配置")
+	}
+}
+
+// TestSaveConfigAcceptsMaskedProviderKey 保障前端原样回传脱敏值时沿用旧密钥，
+// 不会把掩码或空值写进配置。
+func TestSaveConfigAcceptsMaskedProviderKey(t *testing.T) {
+	realKey := "sk-real-abcdefghijklmn"
+	sc := NewSafeConfig(Config{
+		Providers: []Provider{{ID: "DeepSeek", Name: "DeepSeek", APIKey: realKey}},
+	})
+	tmp := t.TempDir()
+	configFilePath = filepath.Join(tmp, "config.json")
+	defer func() { configFilePath = "" }()
+
+	body := `{"providers":[{"id":"DeepSeek","name":"DeepSeek","api_key":"` + maskAPIKey(realKey) + `"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleAPISaveConfig(rec, req, sc)
+
+	if got := sc.Get().Providers[0].APIKey; got != realKey {
+		t.Errorf("回传脱敏值时应沿用真实密钥，得到 %q", got)
+	}
+}
+
+// TestRevealKeyOriginChecks 保障明文查看接口只接受同源、字面量 Host 的请求。
+func TestRevealKeyOriginChecks(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8188/api/config/reveal", nil)
+	r.Host = "127.0.0.1:8188"
+
+	r.Header.Set("Origin", "http://evil.example")
+	if sameOriginRequest(r) {
+		t.Error("跨站来源应被拒绝")
+	}
+	r.Header.Set("Origin", "http://127.0.0.1:8188")
+	if !sameOriginRequest(r) {
+		t.Error("同源来源应放行")
+	}
+	if !isLiteralHost("127.0.0.1:8188") || !isLiteralHost("localhost:8188") {
+		t.Error("本机字面量 Host 应放行")
+	}
+	if isLiteralHost("evil.example:8188") {
+		t.Error("域名 Host 应被拒绝（防 DNS rebinding）")
 	}
 }
 
@@ -1135,7 +1207,3 @@ func TestDetectFormat_PathBased(t *testing.T) {
 		}
 	}
 }
-
-
-
-

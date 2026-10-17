@@ -569,6 +569,18 @@ textarea {
   margin-top: 0.3rem;
 }
 
+/* 回传模式提示：开启防幻觉 / 防循环后出现，说明该请求已离开纯透传路径 */
+.mode-notice {
+  margin: 0 0 0.6rem;
+  padding: 0.45rem 0.7rem;
+  border-left: 0.25rem solid var(--yorha-accent);
+  background: rgba(127, 127, 127, 0.12);
+  color: var(--yorha-fg);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+
 /* ── 尼尔表格设计 ── */
 .yorha-table-container {
   border: 0.15rem solid var(--yorha-fg);

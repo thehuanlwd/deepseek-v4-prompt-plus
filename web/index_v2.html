@@ -358,7 +358,7 @@
                 <label data-i18n="models.api_key">API 密钥 (API Key)</label>
                 <div style="display: flex; gap: 0.8rem; align-items: center;">
                   <div class="yorha-password-input" style="flex: 1;">
-                    <input type="password" id="curProviderApiKey" placeholder="sk-..." value="sk-d98f7e2a9b4c8102374e6f"
+                    <input type="password" id="curProviderApiKey" placeholder="sk-..."
                       oninput="syncAndAutoSaveProviderData()">
                     <button type="button" class="yorha-eye-btn" onclick="toggleModelApiKeyVisibility()"
                       aria-label="切换明密文">
@@ -681,6 +681,7 @@
             <!-- 防幻觉子设置区 -->
             <div id="antihallucinationSubSettings"
               style="display:none; padding-left: 1rem; border-left: 2px solid var(--yorha-border); margin-top: 0.5rem; margin-bottom: 0.5rem;">
+              <div class="mode-notice" data-i18n="settings.anti_hallucination_mode_notice">已切换为「改写回传」：不带工具的请求不再纯透传，响应会先解压、逐行解析并改写，再以明文回传给客户端。</div>
               <div class="config-row" style="flex-direction: column; align-items: flex-start; gap: 0.3rem;">
                 <label style="margin-bottom: 0.2rem;" data-i18n="settings.anti_hallucination_prompt">校准提示语模板</label>
                 <textarea id="cfgAntiHallucinationPrompt" rows="3"
@@ -704,6 +705,7 @@
             <!-- 防无限思考子设置区 -->
             <div id="antiloopSubSettings"
               style="display:none; padding-left: 1rem; border-left: 2px solid var(--yorha-border); margin-top: 0.5rem; margin-bottom: 0.5rem;">
+              <div class="mode-notice" data-i18n="settings.antiloop_mode_notice">已切换为「改写回传」：所有请求不再纯透传，响应会先解压、逐行解析，必要时中断并重试，再以明文回传给客户端。</div>
               <div class="config-row">
                 <label data-i18n="settings.antiloop_retry_model">重试模型</label>
                 <select id="cfgAntiloopRetryModel">

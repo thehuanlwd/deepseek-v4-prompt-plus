@@ -4,6 +4,56 @@ All notable changes to DSPlus are documented here. This project follows the [Kee
 
 ---
 
+## [0.2.5] - 2026-10-17
+
+### Fixed
+- **Compressed upstream streams were read as text and re-emitted line by line, corrupting them** — When a client explicitly advertised `Accept-Encoding`, the upstream (DeepSeek's edge) returned the SSE stream gzip-compressed with `Content-Encoding: gzip`. DSPlus still read that body with a line scanner and wrote every line back as `line + "\n"`, which is lossless for plain-text SSE but silently mutates compressed bytes: a `CRLF` inside the deflate data collapses into a single `LF`, and a trailing newline is appended to the stream. `Content-Encoding: gzip` was forwarded untouched, so the client tried to decompress the damaged stream and failed with `flate: corrupt input`, or parsed a half-written JSON frame and reported `malformed server-sent event JSON`. The proxy's own parser saw no `data:` lines at all, which is why the dashboard showed an empty reply, zero tokens and a zero total duration while the response body rendered as garbage.
+- **Why the defect stayed hidden for 113 requests** — When a client sends no `Accept-Encoding`, Go's transport adds `gzip` on its own and transparently decompresses the response, so DSPlus only ever saw plain text. The failure required two conditions to line up: a client that advertises encodings explicitly (the pi client's HTTP stack sends `br, gzip, deflate, zstd`) and an upstream that honours it. The two providers used earlier never compressed, so nothing broke until the same client was switched to the DeepSeek official endpoint. 23 consecutive requests were affected; two of them aborted outright.
+- **Duplicate `data: [DONE]` in rewritten streams** — The anti-loop retry stream and the anti-hallucination continuation each forwarded the upstream's own `[DONE]` and then appended another terminator, so the client received two end markers on one response. Both loops now skip the upstream marker and leave a single terminator to the finalizer.
+- **Internal retry and analyzer entries stayed unfinished in the dashboard** — Log entries for the anti-loop retry and the analyzer sub-agent kept an empty status and a zero total duration, so they appeared as requests that never completed. They are now closed with `completed` and their own elapsed time; failed internal calls get the same treatment.
+
+### Added
+- **Two response delivery modes** — Requests that may need modification (anti-loop enabled, or anti-hallucination enabled on a tool-less request) take the rewrite path: the body is decompressed first, then parsed and rewritten line by line. Every other request takes a pure passthrough path that forwards the upstream bytes unchanged — no decompression, no parsing, no rewriting — while feeding a sidecar copy to the analyser, so the dashboard, token counters and diagnostic sessions keep working. A sidecar failure only loses statistics; it never blocks or alters forwarding.
+- **Unit tests for the encoding layer** (`passthrough_test.go`) — encoding negotiation, gzip round-trip, plain-text responses not being re-wrapped, and header cleanup after decoding.
+- **Delivery-mode notice in settings** — Enabling anti-hallucination or anti-loop now shows an inline notice under the switch, stating that the affected requests leave the pure passthrough path and are returned to the client as plain text.
+
+### Changed
+- **`Accept-Encoding` is narrowed to what the process can decode** — forwarded requests keep `gzip`/`deflate` only, falling back to `identity` when the client accepts nothing we can decode. Compression stays enabled; `br`/`zstd` are dropped because the standard library cannot decode them.
+- **The rewrite path returns plain text instead of re-compressing** — after decoding, the rewritten stream is sent as plain SSE with `Content-Encoding` and `Content-Length` removed. Re-compression would only save bandwidth on the small subset of requests that need rewriting, which does not justify the extra layer.
+- **Added an MIT `LICENSE` file** and aligned the startup banner with v0.2.5.
+
+### Security
+- **The dashboard no longer hands out plaintext API keys** — `GET /api/config` returns masked values for the legacy key and for every provider. The eye toggle asks `POST /api/config/reveal` for the real value; that endpoint only answers same-origin requests whose Host is an IP literal, which also blocks DNS rebinding. CORS is no longer `*`, so a cross-site page can no longer read any API response.
+- **The provider key input no longer ships a default key** in `index_v2.html`; the field starts empty.
+- **Short keys are fully masked** — keys of eight characters or fewer used to be returned unchanged.
+- **Connectivity tests resolve masked values** — ping, model fetch and test-llm accept the masked key shown in the UI and substitute the stored key server-side, so no plaintext round-trip is needed.
+
+## [0.2.5] 中文 - 2026-10-17
+
+### Fixed（修复）
+- **上游压缩流被当作文本逐行重组，破坏字节完整性** — 客户端显式声明 `Accept-Encoding` 后，上游（DeepSeek 边缘节点）以 gzip 压缩返回 SSE 流，并标注 `Content-Encoding: gzip`。DSPlus 仍按行扫描读取该正文，再逐行以 `line + "\n"` 写回：这对明文 SSE 无损，但会静默改写压缩字节——deflate 数据里的 `CRLF` 被合并成单个 `LF`，流末尾还会多补一个换行。`Content-Encoding: gzip` 又被原样透传，客户端于是对已损坏的压缩流解压，报 `flate: corrupt input`；或读到半截 JSON 帧，报 `malformed server-sent event JSON`。代理自身的解析器则一条 `data:` 行都取不到，表现为回复为空、Token 为 0、总耗时为 0，而响应体在界面上显示为乱码。
+- **为什么潜伏了 113 个请求才暴露** — 客户端不带 `Accept-Encoding` 时，Go 传输层会自行加上 `gzip` 并透明解压，DSPlus 始终只看到明文。触发需要“客户端显式声明编码”与“上游确实压缩”同时成立：pi 客户端的 HTTP 栈固定发送 `br, gzip, deflate, zstd`，而此前使用的两个供应商都不压缩，直到同一客户端切到 DeepSeek 官方通道才命中。连续 23 个请求受影响，其中 2 个直接中断。
+- **改写链路重复发送 `data: [DONE]`** — 防循环的重试流与防幻觉的二阶段流都会转发上游自带的结束标记，收尾逻辑随后又补发一个，客户端在同一轮响应里收到两个结束事件。两处循环现在都跳过上游标记，只由收尾逻辑发出唯一一个。
+- **内部重试与分析请求在仪表盘上显示为未完成** — 防循环重试与分析子 Agent 的日志条目状态为空、总耗时为 0，看起来像卡住的请求。现在统一回填 `completed` 与自身耗时，失败分支同样处理。
+
+### Added（新增）
+- **响应回传双路径** — 需要改写的请求（防循环开启，或防幻觉开启且请求不带工具）走改写路径：先解压，再逐行解析与改写；其余请求走纯透传，上游字节原样转发，不解压、不解析、不改写，另用旁路副本解析，仪表盘、Token 统计与诊断会话照常记录。旁路失败只影响统计，不会阻塞或改变转发。
+- **编码层单元测试**（`passthrough_test.go`）— 覆盖编码协商、gzip 往返、明文响应不被重复包装、解压后的头部清理。
+- **设置页回传模式提示** — 开启防幻觉或防循环后，开关下方会显示提示，说明相关请求已离开纯透传路径，改以明文回传。
+
+### Changed（变更）
+- **`Accept-Encoding` 收敛到本进程能解码的编码** — 转发给上游时只保留 `gzip`/`deflate`，客户端可接受的编码里没有我们能解的就退回 `identity`。压缩仍然启用，只是丢弃标准库无法解码的 `br`/`zstd`。
+- **改写路径改为明文回传，不再回压** — 解压后按行改写，以明文 SSE 发出并移除 `Content-Encoding` 与 `Content-Length`。回压只能为少数需要改写的请求省带宽，收益不足以抵消多出的一层。
+- **新增 MIT `LICENSE` 文件**，启动横幅版本号对齐 v0.2.5。
+
+### Security（安全）
+- **仪表盘不再下发明文 API Key** — `GET /api/config` 对旧字段与全部供应商一律返回脱敏值；点击小眼睛时由 `POST /api/config/reveal` 按需取明文。该接口只接受同源、且 Host 为 IP 字面量的请求（同时挡住 DNS rebinding）。CORS 不再是 `*`，跨站页面已无法读取任何接口响应。
+- **移除页面里写死的默认密钥** — `index_v2.html` 的供应商密钥框不再带默认值，打开时为空。
+- **短密钥不再原样返回** — 此前 8 个字符以内的密钥会被完整回传。
+- **连通性测试支持脱敏值** — 连通性测试、拉取模型、模型试跑都接受界面上显示的脱敏密钥，由服务端换成真实密钥，明文不必再在页面与接口之间往返。
+
+---
+
 ## [0.2.4] - 2026-10-07
 
 ### Added

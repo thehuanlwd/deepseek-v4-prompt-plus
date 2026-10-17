@@ -63,12 +63,12 @@ func main() {
 
 		c := safeCfg.Get()
 
-	initTrace()
-	logger := NewLogger(2000)
-	svc := InitAnalysisService(safeCfg, logger)
-	if svc != nil {
-		svc.config = safeCfg
-	}
+		initTrace()
+		logger := NewLogger(2000)
+		svc := InitAnalysisService(safeCfg, logger)
+		if svc != nil {
+			svc.config = safeCfg
+		}
 		_ = os.Remove("test/proxy_debug_logs.jsonl") // 重启时清空旧的 debug 代理日志
 		proxy := NewProxyServer(safeCfg, logger, svc)
 		initWSHub(logger)
@@ -114,7 +114,7 @@ func main() {
 			navigateGUI(fmt.Sprintf("http://127.0.0.1:%d", c.Port))
 		}
 
-		fmt.Printf("DSPlus v0.1.0\n")
+		fmt.Printf("DSPlus v0.2.5\n")
 		fmt.Printf("Listening on http://%s:%d\n", bindHost, c.Port)
 		fmt.Printf("GUI: http://127.0.0.1:%d\n", c.Port)
 		fmt.Printf("GUI 强制开启。窗口关闭按钮（X）会最小化到托盘；使用托盘菜单“退出”或 Ctrl+C 停止服务\n")

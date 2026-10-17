@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -60,9 +62,7 @@ func handleGUI(w http.ResponseWriter, r *http.Request, l *Logger, cfg *SafeConfi
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	setAPICORS(w, r)
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 
@@ -100,12 +100,14 @@ func handleGUI(w http.ResponseWriter, r *http.Request, l *Logger, cfg *SafeConfi
 		handleAPIGetConfig(w, r, cfg)
 	case path == "/config" && r.Method == "POST":
 		handleAPISaveConfig(w, r, cfg)
+	case path == "/config/reveal" && r.Method == "POST":
+		handleAPIRevealKey(w, r, cfg)
 	case path == "/providers/ping" && r.Method == "POST":
-		handleAPIProviderPing(w, r)
+		handleAPIProviderPing(w, r, cfg)
 	case path == "/providers/fetch-models" && r.Method == "POST":
-		handleAPIFetchModels(w, r)
+		handleAPIFetchModels(w, r, cfg)
 	case path == "/providers/test-llm" && r.Method == "POST":
-		handleAPIProviderTestLLM(w, r)
+		handleAPIProviderTestLLM(w, r, cfg)
 	case path == "/route/preview" && r.Method == "GET":
 		handleAPIRoutePreview(w, r, cfg)
 	case path == "/restart" && r.Method == "POST":
@@ -190,10 +192,45 @@ func handleAPILogDetail(w http.ResponseWriter, r *http.Request, l *Logger, path 
 }
 
 func handleAPIGetConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
-	cfgCopy := cfg.Get()
-	// 返回解密后的真实密钥，交由前端的密码框隐藏；小眼睛可临时显示。
-	// 落盘时再由 SaveConfig 加密，config.json 中不会以明文存储。
-	json.NewEncoder(w).Encode(cfgCopy)
+	// 所有密钥一律脱敏后返回；需要明文时由前端显式调用 /api/config/reveal。
+	json.NewEncoder(w).Encode(configForClient(cfg.Get()))
+}
+
+type revealKeyReq struct {
+	ProviderID string `json:"provider_id"`
+}
+
+func handleAPIRevealKey(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
+	// 明文密钥只允许本机页面按需获取：同源校验 + Host 必须是 IP 字面量，防 DNS rebinding。
+	if !sameOriginRequest(r) || !isLiteralHost(r.Host) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	var req revealKeyReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	c := cfg.Get()
+	key := ""
+	found := false
+	if req.ProviderID == "" {
+		key, found = c.APIKey, true
+	} else {
+		for _, p := range c.Providers {
+			if p.ID == req.ProviderID {
+				key, found = p.APIKey, true
+				break
+			}
+		}
+	}
+	if !found {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"api_key": key})
 }
 
 func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
@@ -228,7 +265,8 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 		if v, ok := updates["providers"]; ok {
 			if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
 				var provs []Provider
-				for _, item := range arr {
+				oldProvs := c.Providers
+				for i, item := range arr {
 					m, ok := item.(map[string]interface{})
 					if !ok {
 						continue
@@ -243,43 +281,47 @@ func handleAPISaveConfig(w http.ResponseWriter, r *http.Request, cfg *SafeConfig
 					if en, ok := m["enabled"].(bool); ok {
 						p.Enabled = boolPtr(en)
 					}
-				if b, ok := m["base_url"].(string); ok {
-					p.BaseURL = strings.TrimRight(b, "/")
-				}
-				if ab, ok := m["anthropic_base_url"].(string); ok {
-					p.AnthropicBaseURL = strings.TrimRight(ab, "/")
-				}
-				if k, ok := m["api_key"].(string); ok {
-					// 防御：若前端回传的是已加密值（旧实例未重启的过渡窗口），先还原明文，避免二次加密。
-					if strings.HasPrefix(k, apiKeyEncPrefix) {
-						if dec, err := decryptAPIKey(k); err == nil {
-							k = dec
-						}
+					if b, ok := m["base_url"].(string); ok {
+						p.BaseURL = strings.TrimRight(b, "/")
 					}
-					p.APIKey = k
-				}
-				if modelsRaw, ok := m["models"].([]interface{}); ok {
-					for _, mItem := range modelsRaw {
-						if mm, ok := mItem.(map[string]interface{}); ok {
-							mc := ModelConfig{}
-							if id, ok := mm["id"].(string); ok {
-								mc.ID = strings.TrimSpace(id)
-							}
-							if name, ok := mm["name"].(string); ok {
-								mc.Name = strings.TrimSpace(name)
-							}
-							if group, ok := mm["group"].(string); ok {
-								mc.Group = strings.TrimSpace(group)
-							}
-							if proto, ok := mm["protocol"].(string); ok {
-								mc.Protocol = strings.TrimSpace(proto)
-							}
-							if mc.ID != "" {
-								p.Models = append(p.Models, mc)
+					if ab, ok := m["anthropic_base_url"].(string); ok {
+						p.AnthropicBaseURL = strings.TrimRight(ab, "/")
+					}
+					if k, ok := m["api_key"].(string); ok {
+						// 前端拿到的是脱敏值；原样回传说明用户没改，沿用旧密钥，避免把掩码写进配置。
+						if old := findProviderKey(oldProvs, p.ID, i); old != "" && k == maskAPIKey(old) {
+							k = old
+						}
+						// 防御：若前端回传的是已加密值（旧实例未重启的过渡窗口），先还原明文，避免二次加密。
+						if strings.HasPrefix(k, apiKeyEncPrefix) {
+							if dec, err := decryptAPIKey(k); err == nil {
+								k = dec
 							}
 						}
+						p.APIKey = k
 					}
-				}
+					if modelsRaw, ok := m["models"].([]interface{}); ok {
+						for _, mItem := range modelsRaw {
+							if mm, ok := mItem.(map[string]interface{}); ok {
+								mc := ModelConfig{}
+								if id, ok := mm["id"].(string); ok {
+									mc.ID = strings.TrimSpace(id)
+								}
+								if name, ok := mm["name"].(string); ok {
+									mc.Name = strings.TrimSpace(name)
+								}
+								if group, ok := mm["group"].(string); ok {
+									mc.Group = strings.TrimSpace(group)
+								}
+								if proto, ok := mm["protocol"].(string); ok {
+									mc.Protocol = strings.TrimSpace(proto)
+								}
+								if mc.ID != "" {
+									p.Models = append(p.Models, mc)
+								}
+							}
+						}
+					}
 					if p.Name == "" {
 						p.Name = "未命名供应商"
 					}
@@ -492,10 +534,106 @@ func setIntField(updates map[string]interface{}, key string, dest *int, min int)
 }
 
 func maskAPIKey(key string) string {
+	if key == "" {
+		return ""
+	}
 	if len(key) <= 8 {
-		return key
+		return "****"
 	}
 	return key[:5] + strings.Repeat("*", len(key)-8) + key[len(key)-3:]
+}
+
+// configForClient 返回给前端的配置副本：所有密钥脱敏，避免网页直接读到明文。
+func configForClient(c Config) Config {
+	out := c
+	out.APIKey = maskAPIKey(c.APIKey)
+	if c.Providers != nil {
+		ps := make([]Provider, len(c.Providers))
+		copy(ps, c.Providers)
+		for i := range ps {
+			ps[i].APIKey = maskAPIKey(ps[i].APIKey)
+		}
+		out.Providers = ps
+	}
+	return out
+}
+
+// findProviderKey 按 ID（优先）或位置取出旧供应商的明文密钥。
+func findProviderKey(old []Provider, id string, idx int) string {
+	if id != "" {
+		for _, p := range old {
+			if p.ID == id {
+				return p.APIKey
+			}
+		}
+	}
+	if idx >= 0 && idx < len(old) {
+		return old[idx].APIKey
+	}
+	return ""
+}
+
+// resolveMaskedAPIKey 把前端回传的脱敏值还原成真实密钥（连通性测试等接口用）。
+func resolveMaskedAPIKey(cfg *SafeConfig, key string) string {
+	if key == "" || !strings.Contains(key, "*") {
+		return key
+	}
+	c := cfg.Get()
+	if c.APIKey != "" && key == maskAPIKey(c.APIKey) {
+		return c.APIKey
+	}
+	for _, p := range c.Providers {
+		if p.APIKey != "" && key == maskAPIKey(p.APIKey) {
+			return p.APIKey
+		}
+	}
+	return key
+}
+
+// setAPICORS 只为同源请求回显 CORS 头，跨站页面无法读取任何接口响应。
+func setAPICORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || !originMatchesHost(origin, r.Host) {
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Add("Vary", "Origin")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+}
+
+func originMatchesHost(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
+}
+
+// sameOriginRequest 判断请求是否来自本机页面（同源）。浏览器发起的跨站请求必带 Origin，可直接拒绝。
+func sameOriginRequest(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return originMatchesHost(origin, r.Host)
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		u, err := url.Parse(ref)
+		return err == nil && strings.EqualFold(u.Host, r.Host)
+	}
+	// 无 Origin/Referer：非浏览器客户端（curl、本地脚本），放行。
+	return true
+}
+
+// isLiteralHost 拒绝以域名形式访问的明文接口，防止 DNS rebinding 把恶意域名指向本机。
+func isLiteralHost(host string) bool {
+	h := host
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		h = hostOnly
+	}
+	h = strings.Trim(h, "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	return net.ParseIP(h) != nil
 }
 
 func handleAPIAnalysisStatus(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
@@ -574,7 +712,6 @@ func handleAPIAnalysisTimeline(w http.ResponseWriter, r *http.Request, path stri
 	json.NewEncoder(w).Encode(page)
 }
 
-
 func handleAPIAnalysisExport(w http.ResponseWriter, r *http.Request, path string, svc *AnalysisService) {
 	id := strings.TrimPrefix(path, "/analysis/sessions/")
 	id = strings.TrimSuffix(id, "/export.md")
@@ -628,7 +765,7 @@ type providerPingReq struct {
 	Protocol         string `json:"protocol"` // "openai" 或 "anthropic"
 }
 
-func handleAPIProviderPing(w http.ResponseWriter, r *http.Request) {
+func handleAPIProviderPing(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
 	var req providerPingReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -670,7 +807,7 @@ func handleAPIProviderPing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := req.APIKey
+	apiKey := resolveMaskedAPIKey(cfg, req.APIKey)
 	if strings.HasPrefix(apiKey, apiKeyEncPrefix) {
 		if dec, err := decryptAPIKey(apiKey); err == nil {
 			apiKey = dec
@@ -721,7 +858,7 @@ type fetchModelsReq struct {
 	APIKey  string `json:"api_key"`
 }
 
-func handleAPIFetchModels(w http.ResponseWriter, r *http.Request) {
+func handleAPIFetchModels(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
 	var req fetchModelsReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -741,7 +878,7 @@ func handleAPIFetchModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := req.APIKey
+	apiKey := resolveMaskedAPIKey(cfg, req.APIKey)
 	if strings.HasPrefix(apiKey, apiKeyEncPrefix) {
 		if dec, err := decryptAPIKey(apiKey); err == nil {
 			apiKey = dec
@@ -841,7 +978,7 @@ type providerTestLLMReq struct {
 	Prompt           string `json:"prompt"`
 }
 
-func handleAPIProviderTestLLM(w http.ResponseWriter, r *http.Request) {
+func handleAPIProviderTestLLM(w http.ResponseWriter, r *http.Request, cfg *SafeConfig) {
 	var req providerTestLLMReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -853,7 +990,7 @@ func handleAPIProviderTestLLM(w http.ResponseWriter, r *http.Request) {
 		prompt = "连接测试，什么都别想，收到回复：收到了"
 	}
 
-	apiKey := req.APIKey
+	apiKey := resolveMaskedAPIKey(cfg, req.APIKey)
 	if strings.HasPrefix(apiKey, apiKeyEncPrefix) {
 		if dec, err := decryptAPIKey(apiKey); err == nil {
 			apiKey = dec

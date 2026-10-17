@@ -276,6 +276,8 @@ func (s *ProxyServer) executeAndStreamRetry(
 			Path:         condStr(format == "anthropic", "/v1/messages", "/v1/chat/completions"),
 			StatusCode:   502,
 			LatencyMs:    time.Since(startTime).Milliseconds(),
+			TotalMs:      time.Since(startTime).Milliseconds(),
+			Status:       "completed",
 			OriginalBody: condStr(cfg.VerboseLogging, truncateBody(string(body)), ""),
 		})
 		return "", nil
@@ -294,6 +296,8 @@ func (s *ProxyServer) executeAndStreamRetry(
 				Path:        condStr(format == "anthropic", "/v1/messages", "/v1/chat/completions"),
 				StatusCode:  500,
 				LatencyMs:   time.Since(startTime).Milliseconds(),
+				TotalMs:     time.Since(startTime).Milliseconds(),
+				Status:      "completed",
 			})
 		}
 	}()
@@ -313,6 +317,12 @@ func (s *ProxyServer) executeAndStreamRetry(
 
 		line := scanner.Text()
 		line = replaceDSMLMarkers(line)
+
+		// 结束标记统一由 finalizeStream 补发：这里跳过上游的 [DONE]，
+		// 否则客户端会在同一轮响应里收到两个结束事件。
+		if strings.TrimSpace(line) == "data: [DONE]" {
+			continue
+		}
 
 		if delta, err := ParseSSELine(line); err == nil && delta != nil {
 			delta.RawChunk["id"] = streamID
@@ -365,9 +375,9 @@ func (s *ProxyServer) executeAndStreamRetry(
 		ResponseBody: condStr(cfg.VerboseLogging, truncateBody(respCapture.String()), ""),
 	})
 	log.Printf("[antiloop] retry logged: id=%d", retryLogID)
-	if lastUsage != nil {
-		s.logger.UpdateTokenUsage(retryLogID, lastUsage)
-	}
+	// 重试请求同样要落「已完成」状态与整轮耗时，否则仪表盘会留下一行未完成的记录。
+	s.logger.UpdateTokenUsageAndStatus(retryLogID, lastUsage, "completed")
+	s.logger.UpdateTotalMs(retryLogID, time.Since(startTime).Milliseconds())
 
 	return finishReason, lastUsage
 }
@@ -487,6 +497,8 @@ func (s *ProxyServer) callAntiLoopAnalyzerWith(analysisBody []byte, pathLabel st
 			Path:        "/v1/chat/completions",
 			StatusCode:  502,
 			LatencyMs:   time.Since(startTime).Milliseconds(),
+			TotalMs:     time.Since(startTime).Milliseconds(),
+			Status:      "completed",
 		})
 		return nil, fmt.Errorf("analyzer API call: %w", err)
 	}
@@ -502,6 +514,8 @@ func (s *ProxyServer) callAntiLoopAnalyzerWith(analysisBody []byte, pathLabel st
 			Path:        "/v1/chat/completions",
 			StatusCode:  resp.StatusCode,
 			LatencyMs:   time.Since(startTime).Milliseconds(),
+			TotalMs:     time.Since(startTime).Milliseconds(),
+			Status:      "completed",
 		})
 		return nil, fmt.Errorf("read analyzer response: %w", err)
 	}
@@ -525,10 +539,9 @@ func (s *ProxyServer) callAntiLoopAnalyzerWith(analysisBody []byte, pathLabel st
 		return nil, fmt.Errorf("parse analyzer response: %w", err)
 	}
 
-	// Extract token usage for analyzer log
-	if u := parseUsageFromMap(oaiResp); u != nil {
-		s.logger.UpdateTokenUsage(analyzerLogID, u)
-	}
+	// 分析子 Agent 也是一次完整调用，同样要回填用量、状态与耗时。
+	s.logger.UpdateTokenUsageAndStatus(analyzerLogID, parseUsageFromMap(oaiResp), "completed")
+	s.logger.UpdateTotalMs(analyzerLogID, time.Since(startTime).Milliseconds())
 
 	choices, ok := oaiResp["choices"].([]interface{})
 	if !ok || len(choices) == 0 {
